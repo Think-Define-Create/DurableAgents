@@ -32,6 +32,8 @@ enum ApprovalPurpose: String, Equatable {
     case reconcile
     /// Approval before a tool intent is journaled. Resolving it does not complete the step.
     case gate
+    /// Approval to keep going after a budget limit. Resolving it does not complete a step.
+    case budget
 }
 
 struct PendingApproval: Equatable {
@@ -54,6 +56,7 @@ struct FoldedSubmission {
     var script: Script
     var driver: RunDriver = .script
     var runID: RunID?
+    var budget: RunBudget?
 }
 
 struct ToolRecord: Equatable {
@@ -105,6 +108,13 @@ struct FoldedRun {
     var finalText: String?
     var failure: String?
     var subagents: [String: SubagentRecord] = [:]
+    var budget: RunBudget?
+    /// `recordedAt` of `run.started`. Wall-clock budgets read this, not the process start.
+    var startedAt: Date?
+    var toolCallCount: Int = 0
+    var tokenCount: Int = 0
+    var lastToolSignature: String?
+    var repeatCount: Int = 0
 }
 
 struct FoldedConversation {
@@ -244,14 +254,18 @@ struct Projection {
             if let raw = event.payload["driver"]?.stringValue, let parsed = RunDriver(rawValue: raw) {
                 driver = parsed
             }
-            conversation.submissions.append(FoldedSubmission(
+            var folded = FoldedSubmission(
                 requestID: requestID,
                 payloadHash: payloadHash,
                 text: text,
                 script: try Script.parse(scriptValue),
                 driver: driver,
                 runID: nil
-            ))
+            )
+            if let raw = event.payload["budget"] {
+                folded.budget = try RunBudget.parse(raw)
+            }
+            conversation.submissions.append(folded)
             conversations[event.stream.raw] = conversation
         case EventType.runStarted:
             guard let runRaw = event.payload["runID"]?.stringValue,
@@ -267,7 +281,7 @@ struct Projection {
             if let raw = event.payload["driver"]?.stringValue, let parsed = RunDriver(rawValue: raw) {
                 driver = parsed
             }
-            conversation.runs[runRaw] = FoldedRun(
+            var started = FoldedRun(
                 id: runID,
                 requestID: requestID,
                 script: try Script.parse(scriptValue),
@@ -276,6 +290,11 @@ struct Projection {
                 status: .running,
                 completedSteps: 0
             )
+            if let raw = event.payload["budget"] {
+                started.budget = try RunBudget.parse(raw)
+            }
+            started.startedAt = event.recordedAt
+            conversation.runs[runRaw] = started
             conversation.runOrder.append(runRaw)
             if let index = conversation.submissions.firstIndex(where: { $0.requestID == requestID && $0.runID == nil }) {
                 conversation.submissions[index].runID = runID
@@ -291,6 +310,14 @@ struct Projection {
                     throw DurableError.invariant("run \(run.id.raw) already journaled call \(inflight.callID.raw)")
                 }
                 run.inflightBatch.append(inflight)
+                run.toolCallCount += 1
+                let signature = inflight.tool + "\n" + inflight.arguments.canonicalJSON()
+                if run.lastToolSignature == signature {
+                    run.repeatCount += 1
+                } else {
+                    run.lastToolSignature = signature
+                    run.repeatCount = 1
+                }
             }
         case EventType.effectResult:
             guard let callID = event.payload["callID"]?.stringValue else {
@@ -323,6 +350,9 @@ struct Projection {
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 run.plannedIndex = Int(stepIndex)
                 run.plannedStep = planned
+                if case .providerTurn(let turn) = planned {
+                    run.tokenCount += (turn.inputTokens ?? 0) + (turn.outputTokens ?? 0)
+                }
             }
         case EventType.stepCompleted:
             guard let stepIndex = event.payload["stepIndex"]?.intValue else {
@@ -373,7 +403,7 @@ struct Projection {
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 if event.payload["approved"]?.boolValue == true,
                    let pending = run.pending,
-                   pending.purpose == .human || pending.purpose == .gate
+                   pending.purpose == .human || pending.purpose == .gate || pending.purpose == .budget
                 {
                     run.grantedApprovalIDs.append(pending.approvalID)
                 }
@@ -422,7 +452,7 @@ struct Projection {
                 record.finalText = event.payload["finalText"]?.stringValue
                 run.subagents[callID] = record
             }
-        case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated, EventType.importNote, EventType.deliveryDeadLettered:
+        case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated, EventType.importNote, EventType.deliveryDeadLettered, EventType.runBudgetExceeded:
             return
         case EventType.runFailed:
             let reason = event.payload["reason"]?.stringValue ?? "failed"

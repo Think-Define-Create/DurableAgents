@@ -194,7 +194,12 @@ public actor AgentSession {
         let existing = profile.conversationID.map { ConversationID(raw: $0) }
         await transcript.beginTurn(conversationID: profile.conversationID)
         let requestID = "req_" + UUID().uuidString.lowercased()
-        let result = try await engine.submitTurn(text, requestID: requestID, to: existing)
+        let result = try await engine.submitTurn(
+            text,
+            requestID: requestID,
+            to: existing,
+            budget: RoutingModelStep.turnBudget
+        )
         if profile.conversationID == nil {
             profile.conversationID = result.conversationID.raw
             directory.upsert(profile)

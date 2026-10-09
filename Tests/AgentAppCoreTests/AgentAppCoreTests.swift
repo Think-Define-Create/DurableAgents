@@ -247,28 +247,15 @@ import Darwin
 }
 
 @Test func routingStopsARunAtTheStepCap() async throws {
-    let builds = ProviderBuildCounter()
-    let step = RoutingModelStep(
-        table: ProviderTable(),
-        policy: PolicyBox(onDeviceOnly: false),
-        secrets: MemorySecretStore(),
-        transcript: LiveTranscript(),
-        builds: builds
-    )
-    let planned = try await step.plan(context: ModelContext(
-        conversationID: ConversationID(raw: "loop"),
-        messages: [TranscriptMessage(messageID: "m", role: "user", text: "remind me")],
-        completedTools: [],
-        grantedApprovalIDs: [],
-        tools: [],
-        completedSteps: RoutingModelStep.maxStepsPerRun
-    ))
-    guard case .finish(let text) = planned else {
-        Issue.record("expected a finish at the step cap")
-        return
-    }
-    #expect(text.contains("Stopped after"))
-    #expect(builds.count == 0)
+    let model = LoopingModel()
+    let harness = try await Harness.open(model: model)
+    let agent = try await harness.session.create(title: "Loop")
+    let sent = try await harness.session.send(agent.id, text: "keep going")
+    #expect(sent.runStatus == RunStatus.failed.rawValue)
+    #expect(sent.failure == "budget exceeded: steps")
+    #expect(model.plans == RoutingModelStep.maxStepsPerRun)
+    let events = try await harness.session.events(for: agent.id)
+    #expect(events.contains { $0.type == EventType.runBudgetExceeded })
 }
 
 @Test func onDeviceOnlyDoesNotBuildACloudProvider() async throws {
@@ -382,6 +369,28 @@ private func getStatus(port: Int) throws -> Int {
     let text = String(decoding: buffer.prefix(max(0, count)), as: UTF8.self)
     let code = text.split(separator: " ").dropFirst().first.map(String.init) ?? ""
     return Int(code) ?? 0
+}
+
+private final class LoopingModel: ModelStep, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var plans: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func plan(context: ModelContext) async throws -> ScriptedStep {
+        record()
+        return .assistant("loop")
+    }
+
+    private func record() {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+    }
 }
 
 private struct Harness {

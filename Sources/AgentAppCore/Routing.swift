@@ -150,14 +150,15 @@ public struct RoutingModelStep: ModelStep {
         self.builds = builds
     }
 
-    /// A run that plans this many steps is stopped. A model that keeps asking for tools would
-    /// otherwise run forever, and recovery would resume it on every launch.
+    /// The session passes this to the engine as `RunBudget.maxSteps`. The engine stops the run
+    /// before the next plan, so a model that keeps asking for tools cannot run forever.
     public static let maxStepsPerRun = 25
 
+    public static var turnBudget: RunBudget {
+        RunBudget(maxSteps: maxStepsPerRun, onExceeded: .fail)
+    }
+
     public func plan(context: ModelContext) async throws -> ScriptedStep {
-        if context.completedSteps >= Self.maxStepsPerRun {
-            return .finish("Stopped after \(Self.maxStepsPerRun) steps without a final answer.")
-        }
         let choice = await table.choice(for: context.conversationID.raw)
         if await policy.onDeviceOnly, OnDevicePolicy.blocksCloud(choice) {
             return .finish("On-device only is on. Switch this agent to Apple or the offline demo before using a cloud model.")

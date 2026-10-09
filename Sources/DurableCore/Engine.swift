@@ -178,21 +178,29 @@ public actor Engine {
                 hash: submission.payloadHash(),
                 script: submission.script,
                 driver: .script,
-                existing: existing
+                existing: existing,
+                budget: submission.budget
             )
         }
     }
 
     /// Starts a model-driven turn. The attached `ModelStep` chooses each step; an empty script does not finish the run.
-    public func submitTurn(_ text: String, requestID: String, to existing: ConversationID? = nil) async throws -> SubmitResult {
+    /// `budget` is journaled on the submission and the run. Nil means no limit.
+    public func submitTurn(
+        _ text: String,
+        requestID: String,
+        to existing: ConversationID? = nil,
+        budget: RunBudget? = nil
+    ) async throws -> SubmitResult {
         try await exclusively {
             try await accept(
                 text: text,
                 requestID: requestID,
-                hash: Submission.modelTurnHash(text: text),
+                hash: Submission.modelTurnHash(text: text, budget: budget),
                 script: Script(steps: []),
                 driver: .model,
-                existing: existing
+                existing: existing,
+                budget: budget
             )
         }
     }
@@ -418,6 +426,12 @@ public actor Engine {
                     }
                     return Self.view(of: conversation)
                 }
+                if run.inflightBatch.isEmpty, run.retryHold == nil,
+                   let reason = Self.budgetBreach(run, now: clock.now())
+                {
+                    try await exceedBudget(conversation: conversation, run: run, reason: reason)
+                    continue
+                }
                 if let hold = run.retryHold {
                     if clock.now() < hold.notBefore {
                         return Self.view(of: conversation)
@@ -503,6 +517,9 @@ public actor Engine {
         if submission.driver == .model {
             payload["driver"] = .string(RunDriver.model.rawValue)
         }
+        if let budget = submission.budget {
+            payload["budget"] = budget.json()
+        }
         _ = try await commit(.conversation(conversation.id), [
             EventDraft(type: EventType.runStarted, payload: .object(payload)),
         ])
@@ -515,7 +532,8 @@ public actor Engine {
         script: Script,
         driver: RunDriver,
         existing: ConversationID?,
-        continueFirst: Bool = true
+        continueFirst: Bool = true,
+        budget: RunBudget? = nil
     ) async throws -> SubmitResult {
         try ensureWritable()
         if requestID.isEmpty {
@@ -565,6 +583,9 @@ public actor Engine {
         ]
         if driver == .model {
             accepted["driver"] = .string(RunDriver.model.rawValue)
+        }
+        if let budget {
+            accepted["budget"] = budget.json()
         }
         drafts.append(EventDraft(type: EventType.submissionAccepted, payload: .object(accepted)))
         drafts.append(Self.messageDraft(
@@ -1074,7 +1095,7 @@ public actor Engine {
                     ),
                 ])
             }
-        case .gate:
+        case .gate, .budget:
             switch decision {
             case .approved, .approvedWithOutput:
                 _ = try await commit(.conversation(conversation.id), [
@@ -1105,6 +1126,90 @@ public actor Engine {
                 ])
             }
         }
+    }
+
+    /// Reasons already waived by an approved `budget:<reason>` id are skipped.
+    /// An in-flight effect or a retry hold is finished first; the check runs before the next step.
+    private static func budgetBreach(_ run: FoldedRun, now: Date) -> String? {
+        guard let budget = run.budget else { return nil }
+        let waived = Set(run.grantedApprovalIDs)
+        func open(_ reason: String) -> Bool {
+            !waived.contains("budget:\(reason)")
+        }
+        if let max = budget.maxSteps, run.completedSteps >= max, open("steps") {
+            return "steps"
+        }
+        if let max = budget.maxToolCalls, run.toolCallCount >= max, open("toolCalls") {
+            return "toolCalls"
+        }
+        if let max = budget.maxTokens, run.tokenCount >= max, open("tokens") {
+            return "tokens"
+        }
+        if let max = budget.maxWallSeconds, let started = run.startedAt, open("wall") {
+            if now.timeIntervalSince(started) >= max {
+                return "wall"
+            }
+        }
+        if run.repeatCount >= 3, open("repeat") {
+            return "repeat"
+        }
+        return nil
+    }
+
+    private func exceedBudget(conversation: FoldedConversation, run: FoldedRun, reason: String) async throws {
+        let disposition = run.budget?.onExceeded ?? .fail
+        var drafts: [EventDraft] = [
+            EventDraft(
+                type: EventType.runBudgetExceeded,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "reason": .string(reason),
+                    "disposition": .string(disposition.rawValue),
+                ])
+            ),
+        ]
+        if disposition == .suspend {
+            let approvalID = "budget:\(reason)"
+            let token = ResumeToken(conversationID: conversation.id, approvalID: approvalID)
+            let prompt = "Budget exceeded (\(reason)). Continue this run?"
+            drafts.append(Self.messageDraft(role: "system", text: prompt, messageID: Self.freshMessageID()))
+            drafts.append(Self.approvalRequestedDraft(
+                run: run,
+                index: run.completedSteps,
+                approvalID: approvalID,
+                prompt: prompt,
+                purpose: .budget,
+                token: token,
+                risk: .standard,
+                requiredAuth: .session,
+                expiresAt: nil,
+                escalateTo: nil,
+                audience: nil
+            ))
+            _ = try await commit(.conversation(conversation.id), drafts)
+            let notice = Self.notice(
+                conversation: conversation,
+                run: run,
+                approvalID: approvalID,
+                prompt: prompt,
+                risk: .standard,
+                purpose: ApprovalPurpose.budget.rawValue,
+                token: token,
+                expiresAt: nil,
+                audience: nil
+            )
+            await approvals.deliver(notice)
+            captureDeliveries(for: notice)
+            return
+        }
+        drafts.append(EventDraft(
+            type: EventType.runFailed,
+            payload: .object([
+                "runID": .string(run.id.raw),
+                "reason": .string("budget exceeded: \(reason)"),
+            ])
+        ))
+        _ = try await commit(.conversation(conversation.id), drafts)
     }
 
     private func requestToolGate(

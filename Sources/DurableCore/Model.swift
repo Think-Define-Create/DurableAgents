@@ -12,6 +12,8 @@ public enum EventType {
     public static let approvalResolved = "approval.resolved"
     public static let runCompleted = "run.completed"
     public static let runFailed = "run.failed"
+    /// A limit on the run was crossed. The same commit either fails the run or asks for approval.
+    public static let runBudgetExceeded = "run.budget.exceeded"
     public static let messageAppended = "message.appended"
     public static let stateWrote = "state.wrote"
     public static let timerRequested = "timer.requested"
@@ -605,29 +607,113 @@ public struct Script: Sendable, Equatable {
     }
 }
 
+/// What the engine does when a run crosses a limit.
+public enum BudgetDisposition: String, Sendable, Equatable, Codable {
+    /// Journal `run.budget.exceeded` and fail the run.
+    case fail
+    /// Journal `run.budget.exceeded` and suspend until a person approves `budget:<reason>`.
+    case suspend
+}
+
+/// Limits for one run. A nil budget means no limit. Counts are taken from the journal, so a
+/// restart enforces the same ceiling. Three identical tool calls in a row count as `repeat`
+/// whenever a budget is set.
+public struct RunBudget: Sendable, Equatable, Codable {
+    public var maxSteps: Int?
+    public var maxToolCalls: Int?
+    public var maxTokens: Int?
+    public var maxWallSeconds: Double?
+    public var onExceeded: BudgetDisposition
+
+    public init(
+        maxSteps: Int? = nil,
+        maxToolCalls: Int? = nil,
+        maxTokens: Int? = nil,
+        maxWallSeconds: Double? = nil,
+        onExceeded: BudgetDisposition = .fail
+    ) {
+        self.maxSteps = maxSteps
+        self.maxToolCalls = maxToolCalls
+        self.maxTokens = maxTokens
+        self.maxWallSeconds = maxWallSeconds
+        self.onExceeded = onExceeded
+    }
+
+    func canonical() -> String {
+        func whole(_ value: Int?) -> String { value.map(String.init) ?? "-" }
+        let wall = maxWallSeconds.map { JSONValue.double($0).canonicalJSON() } ?? "-"
+        return "steps:\(whole(maxSteps));tools:\(whole(maxToolCalls));tokens:\(whole(maxTokens));wall:\(wall);on:\(onExceeded.rawValue)"
+    }
+
+    func json() -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "onExceeded": .string(onExceeded.rawValue),
+        ]
+        if let maxSteps {
+            fields["maxSteps"] = .int(Int64(maxSteps))
+        }
+        if let maxToolCalls {
+            fields["maxToolCalls"] = .int(Int64(maxToolCalls))
+        }
+        if let maxTokens {
+            fields["maxTokens"] = .int(Int64(maxTokens))
+        }
+        if let maxWallSeconds {
+            fields["maxWallSeconds"] = .double(maxWallSeconds)
+        }
+        return .object(fields)
+    }
+
+    static func parse(_ value: JSONValue) throws -> RunBudget {
+        guard let fields = value.objectValue,
+              let raw = fields["onExceeded"]?.stringValue,
+              let disposition = BudgetDisposition(rawValue: raw)
+        else {
+            throw DurableError.invariant("run budget payload is incomplete")
+        }
+        return RunBudget(
+            maxSteps: fields["maxSteps"]?.intValue.map(Int.init),
+            maxToolCalls: fields["maxToolCalls"]?.intValue.map(Int.init),
+            maxTokens: fields["maxTokens"]?.intValue.map(Int.init),
+            maxWallSeconds: try fields["maxWallSeconds"].map { try JSONNumbers.double($0) },
+            onExceeded: disposition
+        )
+    }
+}
+
 public struct Submission: Sendable, Equatable {
     public var requestID: String
     public var text: String
     public var script: Script
+    public var budget: RunBudget?
 
-    public init(requestID: String, text: String, script: Script) {
+    public init(requestID: String, text: String, script: Script, budget: RunBudget? = nil) {
         self.requestID = requestID
         self.text = text
         self.script = script
+        self.budget = budget
     }
 
-    /// SHA-256 of the text plus each script step. Same id with a different hash is a conflict.
+    /// SHA-256 of the text plus each script step. A budget is included only when one is set,
+    /// so older submissions keep their hashes. Same id with a different hash is a conflict.
     public func payloadHash() -> String {
         var lines = [text]
         for (index, step) in script.steps.enumerated() {
             lines.append("\(index):\(step.canonical)")
         }
+        if let budget {
+            lines.append("budget:\(budget.canonical())")
+        }
         return SHA256Hash.hex(lines.joined(separator: "\n"))
     }
 
     /// Hash for a model-driven turn. It does not match a scripted submission of the same text.
-    public static func modelTurnHash(text: String) -> String {
-        SHA256Hash.hex("model\n" + text)
+    public static func modelTurnHash(text: String, budget: RunBudget? = nil) -> String {
+        var body = "model\n" + text
+        if let budget {
+            body += "\nbudget:\(budget.canonical())"
+        }
+        return SHA256Hash.hex(body)
     }
 }
 
