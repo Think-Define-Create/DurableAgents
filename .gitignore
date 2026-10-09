@@ -1,8 +1,9 @@
 .build/
 .swiftpm/
 Package.resolved
-*.xcodeproj
 xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
 DerivedData/
 .DS_Store
 *.sqlite

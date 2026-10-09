@@ -4,7 +4,7 @@ Working name: **PiSwift**.
 
 DurableAgents is a Swift-native durable execution kernel for agent runs. The event log is the source of truth. A conversation runs under a single-owner lease, tool calls declare what kind of side effect they are, and a crash resumes from the journal instead of asking a model what happened.
 
-This repository is the first milestone: the durable core, storage, and tests. It does not call LLM providers.
+The package builds and tests on Linux. The sample iOS app, Escrow Assistant, can also call Apple's on-device Foundation Models framework when the device has Apple Intelligence. That call still goes through the effect journal.
 
 It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT, Copyright (c) 2025 Mario Zechner). This is an original Swift redesign, not a port of that codebase, and it is not affiliated with Earendil. Do not call this product Pi.
 
@@ -12,21 +12,23 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 
 | Target | Role |
 |---|---|
-| `DurableCore` | Event log, lease, effect journal, scripted run loop. No database and no AI SDK. |
+| `DurableCore` | Event log, lease, effect journal, scripted runs, and the `ModelStep` protocol. No database and no Apple SDK. |
 | `DurableStore` | `EventStore`: in-memory, and SQLite through [GRDB](https://github.com/groue/GRDB.swift). |
+| `DurableKit` | `@MainActor` conversation model for SwiftUI: messages, run status, pending approval, event log. Observation is used when the SDK has it. |
+| `DurableFoundationModels` | `FoundationModelsStep` when the Apple framework is present. On Linux this target is a stub. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
-| `DurableAgentsTests` | Swift Testing. |
+| `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
+| `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
-Later milestones can add `PiAI`, `PiAgent`, and `DurableKit` beside these targets. They are not in this package yet.
-
-Platforms: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later (Xcode 16.3 or later). GRDB 7.11 needs that toolchain. iOS apps can sit on a newer SDK; the core stays at these minimums.
+Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
     subgraph host [Host]
-        Script[Scripted model steps]
+        Kit[DurableKit conversation model]
+        Script[Scripted model or Foundation Models]
         Tools[Tools with an effect kind]
     end
 
@@ -43,6 +45,7 @@ flowchart TB
         SQLite[SQLite via GRDB]
     end
 
+    Kit --> Engine
     Script --> Engine
     Tools --> Engine
     Engine --> Log
@@ -58,7 +61,7 @@ One `Engine` actor is the single writer for a store. Opening it acquires a lease
 
 The log is append-only. Payloads keep the schema version they were written with. Readers upcast. `message.appended` v1 (`{"text"}`) becomes v2 (`messageID`, `role`, `text`) in memory. The stored row stays v1.
 
-A run is a script of assistant text, tool calls, approval waits, and a finish step. The script is stored on `run.started`, so recovery does not call a provider. Replace the script with a real model step in a later `PiAI` target.
+A scripted run stores its steps on `run.started`, so recovery does not call a provider. A model-driven run stores `driver: model` and journals each planned step (`model.step.planned`) before executing it. Recovery replays that step. It calls `ModelStep.plan` again only when the plan was not committed. `plan` must not call back into the engine.
 
 ## Effect kinds
 
@@ -100,18 +103,56 @@ Denied approvals fail the run. An external effect that reconciles as `.unknown` 
 
 `RetryPolicy.stub` is stored on `run.started`. The engine does not sleep or retry a failed step. `requestTimer(name:fireAt:)` appends `timer.requested` and calls `TimerScheduling`. The default scheduler does nothing. There is no OS wake-up hook yet.
 
+## Model steps
+
+`ModelStep.plan` returns the same step vocabulary as a script: assistant text, a tool call, an approval, or finish. `ScriptedModelStep` walks a fixed list. `submitTurn` is the model-driven entry point. `submit(Submission)` is unchanged.
+
+`FoundationModelsStep` is compiled only when `FoundationModels` is importable, and its initializer is `@available(iOS 26, macOS 26, *)`. It opens a `LanguageModelSession` with capturing tools. Those tools record the arguments and throw before any side effect. The session surfaces that as `LanguageModelSession.ToolCallError`, and the engine then journals `effect.intent` and runs the real DurableAgents tool. A crash still reconciles from the journal, not from the model.
+
+Each plan uses a new session. The prompt is rebuilt from the durable transcript, because a tool error rolls the Foundation Models transcript back. Check `SystemLanguageModel.default.availability` before using it. `.available` uses the on-device model. `.unavailable(.appleIntelligenceNotEnabled)`, `.unavailable(.deviceNotEligible)`, `.unavailable(.modelNotReady)`, and any other unavailable reason fall back to a scripted model. Escrow Assistant uses `EscrowScriptedModel` for that fallback, and also when the process is launched with `-UseScriptedModel`.
+
+### On-device limits
+
+Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. Escrow Assistant keeps the instructions short, sends three tools, and only the last 12 transcript lines (each truncated) into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device. This sample does not call Private Cloud Compute.
+
+## DurableKit
+
+`ConversationModel` is a `@MainActor` class. When the Observation module is present it is also `@Observable`. It exposes `messages`, `status` (`idle`, `running`, `suspendedForApproval`, `failed`, `done`), `pendingApproval`, the `events` array, and `eventLog` (an `AsyncStream` of envelopes observed after the model is opened). `send` starts a model turn. `approve` and `reject` resume the pending token. `recoverOnLaunch` continues a running journal and reloads a suspended one. `close` drops the lease, which in-process tests need because the pid is still alive.
+
+## Escrow Assistant
+
+Open `Examples/EscrowAssistant/EscrowAssistant.xcodeproj` in **Xcode 26** and press Run. The scheme builds the local package. No generator step.
+
+Use an **iOS 26** device, or an iOS 26 Simulator with Apple Intelligence enabled (Settings, Apple Intelligence and Siri, on a Mac that supports it). The first launch asks for notification permission so an approval can also arrive as an actionable local notification.
+
+The app stores `escrow.sqlite` in Application Support (`EscrowAssistant/`). The chat can:
+
+- **Look up 14 Harbor Lane.** Pure tool `lookupProperty` against a fake property book.
+- **Send the buyer an email.** External tool `sendEmail`. The body writes a fake outbox file, then returns. Recovery calls `reconcile` and does not write a second receipt when the outbox already has that effect key.
+- **Schedule Friday's closing.** The run suspends for approval (`closing`). Approve or reject from the in-app banner or from the notification actions. After approval, idempotent `scheduleClosing` writes a fake calendar entry.
+
+The status line shows whether the turn is using the on-device model or the scripted fallback. The Event log screen lists the journal as it grows.
+
+### Crash demo
+
+1. Tap **Crash now**. That arms a flag and submits a scripted `sendEmail` turn, so the demo does not depend on the model choosing the tool.
+2. The engine commits `effect.intent`, the tool writes the outbox, then the process is killed (`SIGKILL`) before `effect.result`.
+3. Relaunch the app from Xcode. `recoverOnLaunch` steals the lease because the old pid is dead, sees the intent, reconciles against the outbox, and finishes the script. The banner reads that the email was recovered and not sent twice. The transcript shows one tool receipt.
+
+If you run the UI tests (`EscrowAssistantUITests`), pass `-ResetJournal` on the first launch so a previous simulator install does not leave extra receipts. The crash test does that, then relaunches without resetting so recovery can see the journal. Those tests were not executed in this environment.
+
 ## Build and test on a Mac
 
-Install Xcode 16.3 or newer, or a Swift 6.1+ toolchain, and use the project directory:
+Install a Swift 6.1+ toolchain. Xcode 26 is required to compile Escrow Assistant and Foundation Models. The package tests do not need that SDK:
 
 ```bash
 swift test
 swift build
 ```
 
-`swift test` builds `CrashProbe`, kills it mid-tool, and recovers that SQLite file in the test process. It also restarts a second process for approval suspend and resume.
+`swift test` builds `CrashProbe`, kills it mid-tool, and recovers that SQLite file in the test process. It also restarts a second process for approval suspend and resume, and it runs the DurableKit tests against `ScriptedModelStep` and `EscrowScriptedModel`.
 
-To run the same suite in Xcode, open `Package.swift`, wait for package resolution, and choose **Product > Test**.
+To run the package suite in Xcode, open `Package.swift`, wait for package resolution, and choose **Product > Test**. To run the sample, open `Examples/EscrowAssistant/EscrowAssistant.xcodeproj` instead.
 
 Formatting is [swift-format](https://github.com/swiftlang/swift-format) with the `.swift-format` file in the repo root. SwiftLint is not used. No GitHub Actions workflow is required to build or test.
 
@@ -121,6 +162,7 @@ On Linux, install `libsqlite3-dev` and a Swift 6.1+ toolchain, then run the same
 
 ```swift
 import DurableCore
+import DurableKit
 import DurableStore
 
 let store = InMemoryEventStore(storeID: "dev")
@@ -138,6 +180,17 @@ let result = try await engine.submit(Submission(
     ])
 ))
 // result.runStatus == .completed, result.finalText == "done"
+
+let model = try await ConversationModel.open(
+    store: store,
+    tools: [echo],
+    model: ScriptedModelStep(steps: [
+        .tool(name: "echo", callID: "c1", arguments: .string("token-1")),
+        .finish("done"),
+    ]),
+    backendLabel: "script"
+)
+try await model.send("Echo a token")
 ```
 
 SQLite is `try SQLiteEventStore(path: "agent.sqlite")`. The same `Engine` API talks to either store.

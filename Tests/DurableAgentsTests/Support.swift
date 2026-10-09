@@ -17,10 +17,11 @@ struct Harness {
 
     func engine(
         tools: [Tool] = [],
+        model: (any ModelStep)? = nil,
         timers: any TimerScheduling = NoOpTimerScheduling(),
         leaseTTL: Duration = .seconds(3600)
     ) async throws -> Engine {
-        try await Engine(store: store, tools: tools, timers: timers, leaseTTL: leaseTTL)
+        try await Engine(store: store, tools: tools, model: model, timers: timers, leaseTTL: leaseTTL)
     }
 }
 

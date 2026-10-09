@@ -4,6 +4,7 @@ public enum EventType {
     public static let conversationOpened = "conversation.opened"
     public static let submissionAccepted = "submission.accepted"
     public static let runStarted = "run.started"
+    public static let stepPlanned = "model.step.planned"
     public static let stepCompleted = "model.step.completed"
     public static let effectIntent = "effect.intent"
     public static let effectResult = "effect.result"
@@ -83,17 +84,21 @@ public struct ToolReturn: Sendable, Equatable {
 public struct Tool: Sendable {
     public var name: String
     public var effect: EffectKind
+    /// Short text a model can read. The engine does not interpret it.
+    public var summary: String
     public var reconcile: (@Sendable (EffectKey, EffectContext) async throws -> Reconciliation)?
     public var run: @Sendable (JSONValue, EffectContext) async throws -> ToolReturn
 
     public init(
         name: String,
         effect: EffectKind,
+        summary: String = "",
         reconcile: (@Sendable (EffectKey, EffectContext) async throws -> Reconciliation)? = nil,
         run: @escaping @Sendable (JSONValue, EffectContext) async throws -> ToolReturn
     ) {
         self.name = name
         self.effect = effect
+        self.summary = summary
         self.reconcile = reconcile
         self.run = run
     }
@@ -294,6 +299,11 @@ public struct Submission: Sendable, Equatable {
             lines.append("\(index):\(step.canonical)")
         }
         return SHA256Hash.hex(lines.joined(separator: "\n"))
+    }
+
+    /// Hash for a model-driven turn. It does not match a scripted submission of the same text.
+    public static func modelTurnHash(text: String) -> String {
+        SHA256Hash.hex("model\n" + text)
     }
 }
 

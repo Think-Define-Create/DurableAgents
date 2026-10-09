@@ -27,7 +27,16 @@ struct FoldedSubmission {
     var payloadHash: String
     var text: String
     var script: Script
+    var driver: RunDriver = .script
     var runID: RunID?
+}
+
+struct ToolRecord: Equatable {
+    var runID: String
+    var name: String
+    var callID: String
+    var arguments: JSONValue
+    var output: JSONValue
 }
 
 struct FoldedRun {
@@ -35,10 +44,14 @@ struct FoldedRun {
     var requestID: String
     var script: Script
     var retry: RetryPolicy
+    var driver: RunDriver = .script
     var status: RunStatus
     var completedSteps: Int
     var inflight: InflightEffect?
     var pending: PendingApproval?
+    var plannedStep: ScriptedStep?
+    var plannedIndex: Int?
+    var grantedApprovalIDs: [String] = []
     var finalText: String?
     var failure: String?
 }
@@ -49,6 +62,7 @@ struct FoldedConversation {
     var runs: [String: FoldedRun] = [:]
     var runOrder: [String] = []
     var messages: [TranscriptMessage] = []
+    var toolRecords: [ToolRecord] = []
 
     var activeRun: FoldedRun? {
         for runID in runOrder.reversed() {
@@ -67,6 +81,7 @@ struct FoldedConversation {
 
 struct Projection {
     var conversations: [String: FoldedConversation] = [:]
+    var conversationOrder: [String] = []
     var values: [String: JSONValue] = [:]
 
     static func fold(_ events: [EventEnvelope]) throws -> Projection {
@@ -109,11 +124,16 @@ struct Projection {
                 throw DurableError.invariant("submission.accepted is missing fields at seq \(event.globalSeq)")
             }
             var conversation = conversation(event.stream)
+            var driver = RunDriver.script
+            if let raw = event.payload["driver"]?.stringValue, let parsed = RunDriver(rawValue: raw) {
+                driver = parsed
+            }
             conversation.submissions.append(FoldedSubmission(
                 requestID: requestID,
                 payloadHash: payloadHash,
                 text: text,
                 script: try Script.parse(scriptValue),
+                driver: driver,
                 runID: nil
             ))
             conversations[event.stream.raw] = conversation
@@ -127,11 +147,16 @@ struct Projection {
             }
             var conversation = conversation(event.stream)
             let runID = RunID(raw: runRaw)
+            var driver = RunDriver.script
+            if let raw = event.payload["driver"]?.stringValue, let parsed = RunDriver(rawValue: raw) {
+                driver = parsed
+            }
             conversation.runs[runRaw] = FoldedRun(
                 id: runID,
                 requestID: requestID,
                 script: try Script.parse(scriptValue),
                 retry: try RetryPolicy.parse(retryValue),
+                driver: driver,
                 status: .running,
                 completedSteps: 0
             )
@@ -152,10 +177,32 @@ struct Projection {
             guard let callID = event.payload["callID"]?.stringValue else {
                 throw DurableError.invariant("effect.result is missing callID at seq \(event.globalSeq)")
             }
-            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
-                if let inflight = run.inflight, inflight.callID.raw == callID {
-                    run.inflight = nil
+            var conversation = conversation(event.stream)
+            guard let runID = event.payload["runID"]?.stringValue, var run = conversation.runs[runID] else {
+                throw DurableError.invariant("effect.result references unknown run at seq \(event.globalSeq)")
+            }
+            if let inflight = run.inflight, inflight.callID.raw == callID {
+                if event.payload["ok"]?.boolValue == true {
+                    conversation.toolRecords.append(ToolRecord(
+                        runID: runID,
+                        name: inflight.tool,
+                        callID: callID,
+                        arguments: inflight.arguments,
+                        output: event.payload["output"] ?? .null
+                    ))
                 }
+                run.inflight = nil
+            }
+            conversation.runs[runID] = run
+            conversations[event.stream.raw] = conversation
+        case EventType.stepPlanned:
+            guard let stepIndex = event.payload["stepIndex"]?.intValue, let stepValue = event.payload["step"] else {
+                throw DurableError.invariant("model.step.planned is missing fields at seq \(event.globalSeq)")
+            }
+            let planned = try ScriptedStep.parse(stepValue)
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.plannedIndex = Int(stepIndex)
+                run.plannedStep = planned
             }
         case EventType.stepCompleted:
             guard let stepIndex = event.payload["stepIndex"]?.intValue else {
@@ -192,6 +239,12 @@ struct Projection {
             }
         case EventType.approvalResolved:
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                if event.payload["approved"]?.boolValue == true,
+                   let pending = run.pending,
+                   pending.purpose == .human
+                {
+                    run.grantedApprovalIDs.append(pending.approvalID)
+                }
                 run.pending = nil
                 if run.status == .suspended {
                     run.status = .running
@@ -254,8 +307,14 @@ struct Projection {
         conversations[event.stream.raw] = conversation
     }
 
-    private func conversation(_ stream: StreamID) -> FoldedConversation {
-        conversations[stream.raw] ?? FoldedConversation(id: ConversationID(raw: stream.raw))
+    private mutating func conversation(_ stream: StreamID) -> FoldedConversation {
+        if let existing = conversations[stream.raw] {
+            return existing
+        }
+        if !conversationOrder.contains(stream.raw) {
+            conversationOrder.append(stream.raw)
+        }
+        return FoldedConversation(id: ConversationID(raw: stream.raw))
     }
 }
 

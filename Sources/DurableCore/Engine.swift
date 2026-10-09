@@ -9,6 +9,7 @@ import Foundation
 public actor Engine {
     private let store: any EventStore
     private let tools: [String: Tool]
+    private let model: (any ModelStep)?
     private let retryPolicy: RetryPolicy
     private let timers: any TimerScheduling
     private let owner: UUID
@@ -22,6 +23,7 @@ public actor Engine {
     public init(
         store: any EventStore,
         tools: [Tool] = [],
+        model: (any ModelStep)? = nil,
         retryPolicy: RetryPolicy = .stub,
         timers: any TimerScheduling = NoOpTimerScheduling(),
         leaseTTL: Duration = .seconds(30),
@@ -45,6 +47,7 @@ public actor Engine {
         let lease = try await store.acquireLease(owner: owner, pid: pid, ttl: leaseTTL)
         self.store = store
         self.tools = registered
+        self.model = model
         self.retryPolicy = retryPolicy
         self.timers = timers
         self.owner = owner
@@ -77,71 +80,37 @@ public actor Engine {
 
     public func submit(_ submission: Submission, to existing: ConversationID? = nil) async throws -> SubmitResult {
         try await exclusively {
-            try ensureWritable()
-            if submission.requestID.isEmpty {
-                throw DurableError.invariant("requestId is empty")
-            }
-            _ = try await continueRunning()
-            let conversationID = existing ?? ConversationID.generate()
-            let hash = submission.payloadHash()
-            let before = try await load()
-            if let conversation = before.conversations[conversationID.raw],
-               let prior = conversation.submissions.first(where: { $0.requestID == submission.requestID }) {
-                if prior.payloadHash != hash {
-                    throw DurableError.requestIDConflict(
-                        requestID: submission.requestID,
-                        existingHash: prior.payloadHash,
-                        attemptedHash: hash
-                    )
-                }
-                let view = Self.view(of: conversation)
-                return SubmitResult(
-                    conversationID: conversationID,
-                    requestID: submission.requestID,
-                    payloadHash: hash,
-                    duplicate: true,
-                    queued: view.queued,
-                    runStatus: view.runStatus,
-                    resumeToken: view.resumeToken,
-                    finalText: view.finalText,
-                    failure: view.failure
-                )
-            }
-
-            var drafts: [EventDraft] = []
-            if before.conversations[conversationID.raw] == nil {
-                drafts.append(EventDraft(
-                    type: EventType.conversationOpened,
-                    payload: .object(["conversationID": .string(conversationID.raw)])
-                ))
-            }
-            drafts.append(EventDraft(
-                type: EventType.submissionAccepted,
-                payload: .object([
-                    "requestID": .string(submission.requestID),
-                    "payloadHash": .string(hash),
-                    "text": .string(submission.text),
-                    "script": submission.script.json(),
-                ])
-            ))
-            drafts.append(Self.messageDraft(
-                role: "user",
+            try await accept(
                 text: submission.text,
-                messageID: "m_" + UUID().uuidString.lowercased()
-            ))
-            _ = try await commit(.conversation(conversationID), drafts)
-            let settled = try await advance(conversationID)
-            return SubmitResult(
-                conversationID: conversationID,
                 requestID: submission.requestID,
-                payloadHash: hash,
-                duplicate: false,
-                queued: settled.queued,
-                runStatus: settled.runStatus,
-                resumeToken: settled.resumeToken,
-                finalText: settled.finalText,
-                failure: settled.failure
+                hash: submission.payloadHash(),
+                script: submission.script,
+                driver: .script,
+                existing: existing
             )
+        }
+    }
+
+    /// Starts a model-driven turn. The attached `ModelStep` chooses each step; an empty script does not finish the run.
+    public func submitTurn(_ text: String, requestID: String, to existing: ConversationID? = nil) async throws -> SubmitResult {
+        try await exclusively {
+            try await accept(
+                text: text,
+                requestID: requestID,
+                hash: Submission.modelTurnHash(text: text),
+                script: Script(steps: []),
+                driver: .model,
+                existing: existing
+            )
+        }
+    }
+
+    public func listConversations() async throws -> [ConversationID] {
+        try await exclusively {
+            let projection = try await load()
+            return projection.conversationOrder.compactMap { raw in
+                projection.conversations[raw] == nil ? nil : ConversationID(raw: raw)
+            }
         }
     }
 
@@ -270,6 +239,14 @@ public actor Engine {
                     try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
                     continue
                 }
+                if run.driver == .model {
+                    if let planned = run.plannedStep, run.plannedIndex == run.completedSteps {
+                        try await perform(planned, index: run.completedSteps, conversation: conversation, run: run)
+                    } else {
+                        try await planNext(conversation: conversation, run: run)
+                    }
+                    continue
+                }
                 if run.completedSteps >= run.script.steps.count {
                     let text = Self.finalText(in: conversation, fallback: "")
                     _ = try await commit(.conversation(id), [
@@ -302,14 +279,151 @@ public actor Engine {
 
     private func startRun(_ submission: FoldedSubmission, conversation: FoldedConversation) async throws {
         let runID = RunID.generate()
+        var payload: [String: JSONValue] = [
+            "runID": .string(runID.raw),
+            "requestID": .string(submission.requestID),
+            "script": submission.script.json(),
+            "retry": retryPolicy.json(),
+        ]
+        if submission.driver == .model {
+            payload["driver"] = .string(RunDriver.model.rawValue)
+        }
+        _ = try await commit(.conversation(conversation.id), [
+            EventDraft(type: EventType.runStarted, payload: .object(payload)),
+        ])
+    }
+
+    private func accept(
+        text: String,
+        requestID: String,
+        hash: String,
+        script: Script,
+        driver: RunDriver,
+        existing: ConversationID?
+    ) async throws -> SubmitResult {
+        try ensureWritable()
+        if requestID.isEmpty {
+            throw DurableError.invariant("requestId is empty")
+        }
+        _ = try await continueRunning()
+        let conversationID = existing ?? ConversationID.generate()
+        let before = try await load()
+        if let conversation = before.conversations[conversationID.raw],
+           let prior = conversation.submissions.first(where: { $0.requestID == requestID })
+        {
+            if prior.payloadHash != hash {
+                throw DurableError.requestIDConflict(
+                    requestID: requestID,
+                    existingHash: prior.payloadHash,
+                    attemptedHash: hash
+                )
+            }
+            let view = Self.view(of: conversation)
+            return SubmitResult(
+                conversationID: conversationID,
+                requestID: requestID,
+                payloadHash: hash,
+                duplicate: true,
+                queued: view.queued,
+                runStatus: view.runStatus,
+                resumeToken: view.resumeToken,
+                finalText: view.finalText,
+                failure: view.failure
+            )
+        }
+
+        var drafts: [EventDraft] = []
+        if before.conversations[conversationID.raw] == nil {
+            drafts.append(EventDraft(
+                type: EventType.conversationOpened,
+                payload: .object(["conversationID": .string(conversationID.raw)])
+            ))
+        }
+        var accepted: [String: JSONValue] = [
+            "requestID": .string(requestID),
+            "payloadHash": .string(hash),
+            "text": .string(text),
+            "script": script.json(),
+        ]
+        if driver == .model {
+            accepted["driver"] = .string(RunDriver.model.rawValue)
+        }
+        drafts.append(EventDraft(type: EventType.submissionAccepted, payload: .object(accepted)))
+        drafts.append(Self.messageDraft(
+            role: "user",
+            text: text,
+            messageID: "m_" + UUID().uuidString.lowercased()
+        ))
+        _ = try await commit(.conversation(conversationID), drafts)
+        let settled = try await advance(conversationID)
+        return SubmitResult(
+            conversationID: conversationID,
+            requestID: requestID,
+            payloadHash: hash,
+            duplicate: false,
+            queued: settled.queued,
+            runStatus: settled.runStatus,
+            resumeToken: settled.resumeToken,
+            finalText: settled.finalText,
+            failure: settled.failure
+        )
+    }
+
+    private func planNext(conversation: FoldedConversation, run: FoldedRun) async throws {
+        guard let model else {
+            try await failRun(
+                conversation: conversation,
+                run: run,
+                reason: "model-driven run has no ModelStep"
+            )
+            return
+        }
+        let step: ScriptedStep
+        do {
+            step = try await model.plan(context: modelContext(for: conversation, run: run))
+        } catch is SimulatedProcessCrash {
+            poisoned = true
+            throw SimulatedProcessCrash()
+        } catch {
+            try await failRun(conversation: conversation, run: run, reason: String(describing: error))
+            return
+        }
         _ = try await commit(.conversation(conversation.id), [
             EventDraft(
-                type: EventType.runStarted,
+                type: EventType.stepPlanned,
                 payload: .object([
-                    "runID": .string(runID.raw),
-                    "requestID": .string(submission.requestID),
-                    "script": submission.script.json(),
-                    "retry": retryPolicy.json(),
+                    "runID": .string(run.id.raw),
+                    "stepIndex": .int(Int64(run.completedSteps)),
+                    "step": step.json(),
+                ])
+            ),
+        ])
+    }
+
+    private func modelContext(for conversation: FoldedConversation, run: FoldedRun) -> ModelContext {
+        let records = conversation.toolRecords.filter { $0.runID == run.id.raw }
+        let specs = tools.values.map {
+            ModelToolSpec(name: $0.name, effect: $0.effect, summary: $0.summary)
+        }.sorted { $0.name < $1.name }
+        return ModelContext(
+            conversationID: conversation.id,
+            messages: conversation.messages,
+            completedTools: records.map {
+                CompletedToolCall(name: $0.name, callID: $0.callID, arguments: $0.arguments, output: $0.output)
+            },
+            grantedApprovalIDs: run.grantedApprovalIDs,
+            tools: specs,
+            completedSteps: run.completedSteps
+        )
+    }
+
+    private func failRun(conversation: FoldedConversation, run: FoldedRun, reason: String) async throws {
+        _ = try await commit(.conversation(conversation.id), [
+            EventDraft(
+                type: EventType.runFailed,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "reason": .string(reason),
                 ])
             ),
         ])
@@ -365,7 +479,12 @@ public actor Engine {
             let call = CallID(callRaw)
             let key = EffectKey.derive(storeID: storeIdentifier, conversation: conversation.id, call: call)
             guard let tool = tools[name] else {
-                throw DurableError.unknownTool(name)
+                try await failRun(
+                    conversation: conversation,
+                    run: run,
+                    reason: DurableError.unknownTool(name).description
+                )
+                return
             }
             let inflight = InflightEffect(
                 stepIndex: index,

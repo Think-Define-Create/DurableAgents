@@ -3,8 +3,8 @@
 import PackageDescription
 
 // DurableAgents (working name: PiSwift).
-// Later milestones can add PiAI, PiAgent, and DurableKit beside these targets.
-// They are intentionally absent until there is a real provider and agent loop.
+// DurableFoundationModels compiles on Linux as a stub. The Apple framework is
+// wrapped in canImport(FoundationModels) and availability checks.
 
 let package = Package(
     name: "DurableAgents",
@@ -15,6 +15,8 @@ let package = Package(
     products: [
         .library(name: "DurableCore", targets: ["DurableCore"]),
         .library(name: "DurableStore", targets: ["DurableStore"]),
+        .library(name: "DurableKit", targets: ["DurableKit"]),
+        .library(name: "DurableFoundationModels", targets: ["DurableFoundationModels"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -36,6 +38,20 @@ let package = Package(
                 .swiftLanguageMode(.v6),
             ]
         ),
+        .target(
+            name: "DurableKit",
+            dependencies: ["DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableFoundationModels",
+            dependencies: ["DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
         .executableTarget(
             name: "CrashProbe",
             dependencies: ["DurableCore", "DurableStore"],
@@ -45,7 +61,14 @@ let package = Package(
         ),
         .testTarget(
             name: "DurableAgentsTests",
-            dependencies: ["DurableCore", "DurableStore", "CrashProbe"],
+            dependencies: ["DurableCore", "DurableStore", "CrashProbe", "DurableFoundationModels"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableKitTests",
+            dependencies: ["DurableCore", "DurableStore", "DurableKit"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
