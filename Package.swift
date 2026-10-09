@@ -21,6 +21,8 @@ let package = Package(
         .library(name: "PiAgent", targets: ["PiAgent"]),
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
         .library(name: "DurableDelivery", targets: ["DurableDelivery"]),
+        .library(name: "DurableMCP", targets: ["DurableMCP"]),
+        .executable(name: "mcp-fixture", targets: ["MCPFixture"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
         .library(name: "PiDurableImport", targets: ["PiDurableImport"]),
@@ -31,6 +33,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", "3.12.3"..<"3.15.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.1"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.11.0"),
+        .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     ],
     targets: [
         .target(
@@ -199,6 +203,39 @@ let package = Package(
         .testTarget(
             name: "DurableDeliveryTests",
             dependencies: ["DurableDelivery", "DurableCore", "DurableStore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableMCP",
+            dependencies: [
+                "DurableCore",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "SystemPackage", package: "swift-system"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .executableTarget(
+            name: "MCPFixture",
+            dependencies: [
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableMCPTests",
+            dependencies: [
+                "DurableMCP",
+                "DurableCore",
+                "DurableStore",
+                "MCPFixture",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

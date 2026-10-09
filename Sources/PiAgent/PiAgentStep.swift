@@ -111,7 +111,8 @@ public struct PiAgentStep: ModelStep {
         var tools = context.tools.map { spec in
             ModelToolDefinition(
                 name: spec.name,
-                description: spec.summary.isEmpty ? spec.effect.rawValue : spec.summary
+                description: spec.summary.isEmpty ? spec.effect.rawValue : spec.summary,
+                parametersJSON: spec.parametersJSON
             )
         }
         for name in subagentTools.sorted() where !tools.contains(where: { $0.name == name }) {

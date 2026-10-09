@@ -10,11 +10,18 @@ public struct ModelToolSpec: Sendable, Equatable {
     public var name: String
     public var effect: EffectKind
     public var summary: String
+    public var parametersJSON: String
 
-    public init(name: String, effect: EffectKind, summary: String) {
+    public init(
+        name: String,
+        effect: EffectKind,
+        summary: String,
+        parametersJSON: String = #"{"type":"object","properties":{}}"#
+    ) {
         self.name = name
         self.effect = effect
         self.summary = summary
+        self.parametersJSON = parametersJSON
     }
 }
 

@@ -30,6 +30,8 @@ struct PendingTimer: Equatable {
 enum ApprovalPurpose: String, Equatable {
     case human
     case reconcile
+    /// Approval before a tool intent is journaled. Resolving it does not complete the step.
+    case gate
 }
 
 struct PendingApproval: Equatable {
@@ -371,7 +373,7 @@ struct Projection {
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 if event.payload["approved"]?.boolValue == true,
                    let pending = run.pending,
-                   pending.purpose == .human
+                   pending.purpose == .human || pending.purpose == .gate
                 {
                     run.grantedApprovalIDs.append(pending.approvalID)
                 }

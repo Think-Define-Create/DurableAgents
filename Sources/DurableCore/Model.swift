@@ -101,6 +101,11 @@ public struct Tool: Sendable {
     public var effect: EffectKind
     /// Short text a model can read. The engine does not interpret it.
     public var summary: String
+    /// JSON Schema for the model. The engine does not validate it.
+    public var parametersJSON: String
+    /// When true, the engine suspends for approval before journaling the intent.
+    public var requiresApproval: Bool
+    public var approvalRisk: ApprovalRisk
     public var reconcile: (@Sendable (EffectKey, EffectContext) async throws -> Reconciliation)?
     public var run: @Sendable (JSONValue, EffectContext) async throws -> ToolReturn
 
@@ -108,12 +113,18 @@ public struct Tool: Sendable {
         name: String,
         effect: EffectKind,
         summary: String = "",
+        parametersJSON: String = #"{"type":"object","properties":{}}"#,
+        requiresApproval: Bool = false,
+        approvalRisk: ApprovalRisk = .standard,
         reconcile: (@Sendable (EffectKey, EffectContext) async throws -> Reconciliation)? = nil,
         run: @escaping @Sendable (JSONValue, EffectContext) async throws -> ToolReturn
     ) {
         self.name = name
         self.effect = effect
         self.summary = summary
+        self.parametersJSON = parametersJSON
+        self.requiresApproval = requiresApproval
+        self.approvalRisk = approvalRisk
         self.reconcile = reconcile
         self.run = run
     }

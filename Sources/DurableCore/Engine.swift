@@ -52,9 +52,6 @@ public actor Engine {
             if tool.name.isEmpty {
                 throw DurableError.invariant("tool name is empty")
             }
-            if tool.effect == .external && tool.reconcile == nil {
-                throw DurableError.missingReconcile(tool: tool.name)
-            }
             registered[tool.name] = tool
         }
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -595,7 +592,12 @@ public actor Engine {
     private func modelContext(for conversation: FoldedConversation, run: FoldedRun) -> ModelContext {
         let records = conversation.toolRecords.filter { $0.runID == run.id.raw }
         let specs = tools.values.map {
-            ModelToolSpec(name: $0.name, effect: $0.effect, summary: $0.summary)
+            ModelToolSpec(
+                name: $0.name,
+                effect: $0.effect,
+                summary: $0.summary,
+                parametersJSON: $0.parametersJSON
+            )
         }.sorted { $0.name < $1.name }
         var visible = Array(conversation.messages.dropFirst(conversation.promptStartIndex))
         if let summary = conversation.compactionSummary, !summary.isEmpty {
@@ -751,6 +753,17 @@ public actor Engine {
                 )
                 return
             }
+            let approvalID = "tool:\(name):\(call.raw)"
+            if tool.requiresApproval && !run.grantedApprovalIDs.contains(approvalID) {
+                try await requestToolGate(
+                    conversation: conversation,
+                    run: run,
+                    index: index,
+                    tool: tool,
+                    callID: call.raw
+                )
+                return
+            }
             let inflight = InflightEffect(
                 stepIndex: index,
                 callID: call,
@@ -808,24 +821,25 @@ public actor Engine {
             )
         }
         if inflight.effect == .external {
-            guard let reconcile = tool.reconcile else {
-                throw DurableError.missingReconcile(tool: tool.name)
-            }
-            let context = effectContext(
-                inflight,
-                conversation: conversation,
-                isReplay: true,
-                attempt: Self.replayAttempt(inflight)
-            )
             let outcome: Reconciliation
-            do {
-                outcome = try await reconcile(inflight.key, context)
-            } catch is SimulatedProcessCrash {
-                poisoned = true
-                throw SimulatedProcessCrash()
-            } catch {
-                try await failInflight(conversation: conversation, run: run, inflight: inflight, error: error)
-                return
+            if let reconcile = tool.reconcile {
+                let context = effectContext(
+                    inflight,
+                    conversation: conversation,
+                    isReplay: true,
+                    attempt: Self.replayAttempt(inflight)
+                )
+                do {
+                    outcome = try await reconcile(inflight.key, context)
+                } catch is SimulatedProcessCrash {
+                    poisoned = true
+                    throw SimulatedProcessCrash()
+                } catch {
+                    try await failInflight(conversation: conversation, run: run, inflight: inflight, error: error)
+                    return
+                }
+            } else {
+                outcome = .unknown(reason: "external tool \(inflight.tool) has no reconcile hook")
             }
             switch outcome {
             case .done(let output):
@@ -1024,7 +1038,79 @@ public actor Engine {
                     ),
                 ])
             }
+        case .gate:
+            switch decision {
+            case .approved, .approvedWithOutput:
+                _ = try await commit(.conversation(conversation.id), [
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: true,
+                        reason: nil,
+                        approver: approver
+                    ),
+                ])
+            case .denied(let reason):
+                _ = try await commit(.conversation(conversation.id), [
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: false,
+                        reason: reason,
+                        approver: approver
+                    ),
+                    EventDraft(
+                        type: EventType.runFailed,
+                        payload: .object([
+                            "runID": .string(run.id.raw),
+                            "reason": .string("approval denied: \(reason)"),
+                        ])
+                    ),
+                ])
+            }
         }
+    }
+
+    private func requestToolGate(
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        index: Int,
+        tool: Tool,
+        callID: String
+    ) async throws {
+        let approvalID = "tool:\(tool.name):\(callID)"
+        let token = ResumeToken(conversationID: conversation.id, approvalID: approvalID)
+        let required = tool.approvalRisk == .high ? AuthenticationLevel.devicePasscode : AuthenticationLevel.session
+        let prompt = "Approve \(tool.name) before it runs?"
+        _ = try await commit(.conversation(conversation.id), [
+            Self.messageDraft(role: "system", text: prompt, messageID: Self.freshMessageID()),
+            Self.approvalRequestedDraft(
+                run: run,
+                index: index,
+                approvalID: approvalID,
+                prompt: prompt,
+                purpose: .gate,
+                token: token,
+                risk: tool.approvalRisk,
+                requiredAuth: required,
+                expiresAt: nil,
+                escalateTo: nil,
+                audience: nil
+            ),
+        ])
+        let notice = Self.notice(
+            conversation: conversation,
+            run: run,
+            approvalID: approvalID,
+            prompt: prompt,
+            risk: tool.approvalRisk,
+            purpose: ApprovalPurpose.gate.rawValue,
+            token: token,
+            expiresAt: nil,
+            audience: nil
+        )
+        await approvals.deliver(notice)
+        captureDeliveries(for: notice)
     }
 
     private func performProviderTurn(
@@ -1044,6 +1130,17 @@ public actor Engine {
             }
             guard let tool = tools[call.name] else {
                 try await failRun(conversation: conversation, run: run, reason: DurableError.unknownTool(call.name).description)
+                return
+            }
+            let approvalID = "tool:\(tool.name):\(call.callID)"
+            if tool.requiresApproval && !run.grantedApprovalIDs.contains(approvalID) {
+                try await requestToolGate(
+                    conversation: conversation,
+                    run: run,
+                    index: index,
+                    tool: tool,
+                    callID: call.callID
+                )
                 return
             }
             let inflight = InflightEffect(

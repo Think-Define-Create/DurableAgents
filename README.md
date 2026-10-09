@@ -21,6 +21,8 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
 | `DurableDelivery` | Journaled webhook, Slack, and APNs delivery with backoff and dead letters. |
+| `DurableMCP` | MCP client and server on the official Swift SDK (spec 2025-11-25). |
+| `mcp-fixture` | Tiny stdio MCP server the Linux tests spawn. |
 | `DurableObserve` | swift-log adapter for run, model, and effect spans. Attributes are scrubbed. |
 | `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
 | `PiDurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
@@ -100,7 +102,7 @@ _ = try await restarted.recover()
 let done = try await restarted.resume(token: token, decision: .approved)
 ```
 
-Denied approvals fail the run. An external effect that reconciles as `.unknown` uses the same suspend path; resume it with `.approvedWithOutput` so a person supplies the result.
+Denied approvals fail the run. An external effect that reconciles as `.unknown` uses the same suspend path; resume it with `.approvedWithOutput` so a person supplies the result. An external tool registered with no reconcile hook takes that path on recovery. A tool with `requiresApproval` suspends with purpose `gate` before `effect.intent`. Approving it does not finish the step; the same step then journals the intent and runs the body. High risk asks for `devicePasscode`.
 
 `resume` records `approver` and `authLevel` on `approval.resolved`. A high-risk approval requires at least `devicePasscode`. `biometric` also satisfies that bar. `ApprovalChannel` is how a host is told: `LocalNotificationChannel` builds a notification draft, `PushApprovalChannel` builds an APNs `aps` alert, `WebhookApprovalChannel` posts either a Slack `{"text"}` body or a generic JSON body, and `WebApprovalChannel` keeps an in-app list. An optional webhook `Authorization` header is not written to the log.
 
@@ -133,6 +135,33 @@ Delivery runs started from an approval channel use `RetryPolicy.standard` even i
 Generic webhooks are signed with HMAC-SHA256. `X-Timestamp` is unix seconds. `X-Signature` is `v1=` plus the hex of HMAC-SHA256(secret, `"<timestamp>.<raw body>"`). The body is canonical JSON, and the signature covers those exact bytes, including `delivery-id`. Verifiers should reject a timestamp outside a few minutes. The signing secret is a secret-account name (`signingSecretAccount`), resolved at send time, and is not journaled. The same is true of `authorizationSecretAccount` and of a Slack URL stored under `webhookSecretAccount`. Slack incoming webhooks are not signed; their documented body is `{"text":"..."}` plus our `delivery-id`. Do not put a Slack URL that contains the token in the journal.
 
 APNs uses token auth. The JWT header is `alg` `ES256` and `kid`. The claims are `iss` and `iat`. The `.p8` key is PKCS#8 PEM loaded from `authKeyAccount`. Request headers follow Apple's current token-auth API: `authorization: bearer <jwt>`, `apns-topic`, `apns-push-type`, `apns-id`, and `apns-priority` (`10` for `alert`, `5` for `background`). The host is `api.push.apple.com` or `api.sandbox.push.apple.com`. `APNsLiveSender` uses `URLSession` HTTP/2 and is compiled only on Apple. Linux Foundation is HTTP/1.1, so `APNsSupport.liveSenderCompiled` is false there and a live send throws. The JWT builder, the request builder, and a stubbed HTTP transport are what the Linux tests exercise. The live Apple sender was not compiled or verified in this environment.
+
+## MCP
+
+`DurableMCP` uses the official [Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) (package `swift-sdk`, product `MCP`, resolved at 0.12.1). New contributions to that SDK are Apache 2.0; existing code is MIT. The protocol version this SDK implements, and the current spec, is **2025-11-25**. DurableAgents does not add protocol fields. Tool annotations it reads are the spec fields `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` (plus `title` on the tool). `openWorldHint` is stored and does not pick an effect kind.
+
+| Hint | Effect | Approval |
+|---|---|---|
+| `readOnlyHint: true` | `pure` | no |
+| `idempotentHint: true` (and not read-only) | `idempotent` | no |
+| `destructiveHint: true` | `external`, no reconcile | yes, risk `high` |
+| hints absent, or not read-only and not idempotent | `external`, no reconcile | yes, risk `standard` |
+
+A server config file can override `effect`, `approval`, `risk`, and `replayOnCrash` per remote tool name. Set fields win. `replayOnCrash: true` installs a reconcile hook that returns `.notDone`, so a crash runs the same call again. Otherwise an external MCP tool has no reconcile hook: recovery suspends for a human or a later model-guided decision instead of calling the server again.
+
+Each exposed tool is named `mcp.<server>.<tool>`. `allow` is a per-server allowlist of remote names. An empty allowlist exposes nothing. The input schema is copied onto the engine tool so the model can see it. Intent and result are journaled like any other tool. Text content is stored. Image and audio bytes are not. Redaction and encryption apply when the store is wrapped with `EncryptingEventStore`.
+
+Auth is secret-account names: `envSecrets` for stdio environment variables, `headerSecrets` for HTTP headers. The value is resolved at connect time and is not written to the journal or to error text. A missing account fails with `missing secret account <name>`.
+
+stdio uses `Foundation.Process` on macOS and Linux. It is not available on iOS (`MCPPlatform.stdioAvailable`). Streamable HTTP is a JSON POST through `HTTPClientTransport` with SSE turned off, so the same client runs on Linux and on iOS. The SDK's SSE client is compiled only off Linux and was not exercised here (`MCPPlatform.sseStreamingCompiled` is false on Linux). Calls check cancellation, honor `timeoutSeconds`, and open one new connection after an MCP `connectionClosed` error. Other MCP errors are not retried. SDK failures are rethrown as `MCPCallError` with a fixed sentence so a URL or token in `localizedDescription` cannot reach the journal.
+
+`DurableMCPServer` exposes the engine to other clients (Claude, Cursor, a LangGraph back office). Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`, `approve`, `reject`, `export_audit`. `approve` and `reject` require `approverId` and `authLevel` (`anonymous`, `session`, `devicePasscode`, `biometric`). The server allowlist is a set of approver ids; an empty set refuses every approval. The engine still rejects an auth level below the approval's requirement. `export_audit` is `AuditExport.jsonl`, which omits message text and tool arguments. stdio and stateless streamable HTTP (POST JSON, GET 405) are both wired. Do not call this server from a tool on the same engine. The tool runs while the engine holds its lock.
+
+### MCP security
+
+MCP tool descriptions and results are untrusted input. A hostile or compromised server can poison a later prompt (tool poisoning, prompt injection) by putting instructions in a description or a tool result. Treat annotations as hints, not as proof: the spec says clients should not make safety decisions from annotations received from an untrusted server. This mapping is a default for servers you chose to configure, not a guarantee.
+
+Keep a per-server allowlist. Do not point a run at a server and expose every tool it lists. Destructive tools, and tools with no hints, require approval before the effect is journaled. High-risk approvals need `devicePasscode` or `biometric`. Prefer a config override when you know a tool is read-only or idempotent, and leave `replayOnCrash` off unless the server dedupes on something you control. The engine does not send an idempotency key on MCP calls. Secret values stay in the secret store. Config files store account names only.
 
 ## Model steps
 
