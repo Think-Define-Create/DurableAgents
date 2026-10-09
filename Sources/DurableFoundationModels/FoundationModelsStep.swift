@@ -132,14 +132,29 @@ public struct FoundationModelsStep: ModelStep {
                 throw error
             }
             return step(for: call, context: context, gates: gates)
-        } catch let error as LanguageModelError {
-            if case .contextSizeExceeded = error {
+        } catch {
+            if isContextOverflow(error) {
                 throw DurableError.invariant(
                     "on-device context window exceeded (4096 tokens, including tool schemas)"
                 )
             }
             throw error
         }
+    }
+
+    /// `LanguageModelError` replaces `GenerationError` from macOS 27; check both.
+    @available(iOS 26, macOS 26, *)
+    private static func isContextOverflow(_ error: any Error) -> Bool {
+        if #available(iOS 27, macOS 27, *),
+           let error = error as? LanguageModelError,
+           case .contextSizeExceeded = error {
+            return true
+        }
+        if let error = error as? LanguageModelSession.GenerationError,
+           case .exceededContextWindowSize = error {
+            return true
+        }
+        return false
     }
 
     private static func step(
@@ -182,9 +197,8 @@ public struct FoundationModelsStep: ModelStep {
     }
 }
 
-/// On-device provider for `PiAgentStep`. One `respond` call is one checkpoint.
-/// Streaming partial tokens from Foundation Models is not used here; that API was not
-/// compiled in this environment.
+/// On-device provider for `PiAgentStep`. One `streamResponse` call is one checkpoint.
+/// Text streams as deltas so the UI can show it while the model is still generating.
 @available(iOS 26, macOS 26, *)
 public struct FoundationModelsProvider: ModelProvider {
     public var instructions: String
@@ -196,6 +210,14 @@ public struct FoundationModelsProvider: ModelProvider {
     ) {
         self.instructions = instructions
         self.makeTools = makeTools
+    }
+
+    /// Loads the on-device model ahead of the first turn. Each turn still uses a fresh session.
+    public func prewarm() {
+        LanguageModelSession(model: SystemLanguageModel.default, tools: makeTools(FoundationToolCapture())) {
+            instructions
+        }
+        .prewarm()
     }
 
     public func stream(_ request: ModelRequest) -> AsyncThrowingStream<ModelStreamEvent, Error> {
@@ -212,8 +234,15 @@ public struct FoundationModelsProvider: ModelProvider {
                     instructions
                 }
                 do {
-                    let response = try await session.respond(to: Prompt(prompt))
-                    continuation.yield(.textDelta(response.content))
+                    // Snapshots carry the whole text so far. Only a strict extension of what was
+                    // already sent goes out, because consumers concatenate deltas.
+                    var sent = ""
+                    for try await snapshot in session.streamResponse(to: Prompt(prompt)) {
+                        let text = snapshot.content
+                        guard text.count > sent.count, text.hasPrefix(sent) else { continue }
+                        continuation.yield(.textDelta(String(text.dropFirst(sent.count))))
+                        sent = text
+                    }
                     continuation.yield(.stop(StopReason(raw: "end_turn")))
                     continuation.finish()
                 } catch let error as LanguageModelSession.ToolCallError {

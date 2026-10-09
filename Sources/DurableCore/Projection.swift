@@ -516,3 +516,11 @@ extension FoldedConversation {
         )
     }
 }
+
+extension ConversationSnapshot {
+    /// Folds `events` once and returns every conversation's snapshot, keyed by conversation id.
+    /// Lets a caller that already read the log avoid one full fold per conversation.
+    public static func all(from events: [EventEnvelope]) throws -> [String: ConversationSnapshot] {
+        try Projection.fold(events).conversations.mapValues { $0.snapshot() }
+    }
+}

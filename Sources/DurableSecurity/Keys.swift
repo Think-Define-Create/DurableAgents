@@ -137,14 +137,26 @@ enum AESGCM {
 import Security
 
 /// Keychain item per conversation scope. Not compiled on Linux.
-public struct KeychainKeyProvider: ConversationKeyProvider {
-    public var service: String
+/// Keys are cached after the first lookup, because every event read or written needs one
+/// and each Keychain query is a round trip to the security daemon.
+public actor KeychainKeyProvider: ConversationKeyProvider {
+    public let service: String
+    private var cache: [String: Data] = [:]
 
     public init(service: String = "DurableAgents.keys") {
         self.service = service
     }
 
     public func loadKey(for scope: String) async throws -> Data {
+        if let cached = cache[scope] {
+            return cached
+        }
+        let key = try fetchOrCreate(scope)
+        cache[scope] = key
+        return key
+    }
+
+    private func fetchOrCreate(_ scope: String) throws -> Data {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -172,6 +184,7 @@ public struct KeychainKeyProvider: ConversationKeyProvider {
     }
 
     public func shred(_ scope: String) async throws {
+        cache.removeValue(forKey: scope)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

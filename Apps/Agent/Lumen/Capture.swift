@@ -80,7 +80,8 @@ struct DocumentCamera: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(onText: onText) }
 
-    final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
+    @MainActor
+    final class Coordinator: NSObject, @MainActor VNDocumentCameraViewControllerDelegate {
         let onText: (String) -> Void
         init(onText: @escaping (String) -> Void) { self.onText = onText }
 

@@ -126,11 +126,23 @@ private func wasKilled(_ run: ProbeRun) -> Bool {
     return run.status == 9 || run.status == 137
 }
 
+/// On macOS, Swift Testing runs under `swiftpm-testing-helper`, so also look in the package's `.build`.
 private func crashProbeURL() throws -> URL {
     var url = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
     for _ in 0..<8 {
         url.deleteLastPathComponent()
         let candidate = url.appendingPathComponent("CrashProbe")
+        if FileManager.default.isExecutableFile(atPath: candidate.path) {
+            return candidate
+        }
+    }
+    let build = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent(".build")
+    for configuration in ["debug", "release"] {
+        let candidate = build.appendingPathComponent(configuration).appendingPathComponent("CrashProbe")
         if FileManager.default.isExecutableFile(atPath: candidate.path) {
             return candidate
         }

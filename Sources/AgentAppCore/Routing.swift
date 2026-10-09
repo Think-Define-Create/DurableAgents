@@ -25,6 +25,14 @@ public actor LiveTranscript {
     public func clear(conversationID: String) {
         text[conversationID] = nil
     }
+
+    /// Starts a turn so `latest()` shows only this turn's text, not an earlier reply.
+    public func beginTurn(conversationID: String?) {
+        if let conversationID {
+            text[conversationID] = nil
+        }
+        latestID = conversationID ?? ""
+    }
 }
 
 public struct PublishingProvider: ModelProvider {
@@ -62,6 +70,7 @@ public struct PublishingProvider: ModelProvider {
 }
 
 /// Offline stand-in. A URL in the user text asks for `web.fetch`. "remind" asks for `notes.reminder`.
+/// After a tool result it answers in text, or the same request would ask for the tool again forever.
 public struct DemoChatProvider: ModelProvider {
     public var appleFallbackNote: Bool
 
@@ -71,10 +80,13 @@ public struct DemoChatProvider: ModelProvider {
 
     public func stream(_ request: ModelRequest) -> AsyncThrowingStream<ModelStreamEvent, Error> {
         let text = request.messages.last(where: { $0.role == .user })?.text ?? ""
+        let afterTool = request.messages.last?.role == .tool
         let note = appleFallbackNote
         return AsyncThrowingStream { continuation in
             let task = Task {
-                if let url = Self.firstURL(in: text) {
+                if afterTool {
+                    continuation.yield(.textDelta("Done."))
+                } else if let url = Self.firstURL(in: text) {
                     let arguments = JSONValue.object(["url": .string(url)]).canonicalJSON()
                     continuation.yield(.toolCall(ProviderToolCall(id: "demo-web", name: BuiltinToolID.webFetch, argumentsJSON: arguments)))
                 } else if text.lowercased().contains("remind") {
@@ -138,7 +150,14 @@ public struct RoutingModelStep: ModelStep {
         self.builds = builds
     }
 
+    /// A run that plans this many steps is stopped. A model that keeps asking for tools would
+    /// otherwise run forever, and recovery would resume it on every launch.
+    public static let maxStepsPerRun = 25
+
     public func plan(context: ModelContext) async throws -> ScriptedStep {
+        if context.completedSteps >= Self.maxStepsPerRun {
+            return .finish("Stopped after \(Self.maxStepsPerRun) steps without a final answer.")
+        }
         let choice = await table.choice(for: context.conversationID.raw)
         if await policy.onDeviceOnly, OnDevicePolicy.blocksCloud(choice) {
             return .finish("On-device only is on. Switch this agent to Apple or the offline demo before using a cloud model.")

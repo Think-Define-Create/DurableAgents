@@ -20,6 +20,19 @@ public struct SendOutcome: Sendable, Equatable {
     }
 }
 
+/// Everything a screen refresh needs, built from one read of the log.
+public struct SessionOverview: Sendable, Equatable {
+    public var inbox: [InboxItem]
+    public var messages: [TranscriptMessage]
+    public var events: [RunEvent]
+    public var usage: UsageSummary?
+    public var runningAgents: Int
+
+    public var widget: WidgetSnapshot {
+        WidgetSnapshot(pendingApprovals: inbox.count, runningAgents: runningAgents, prompts: inbox.map(\.prompt))
+    }
+}
+
 /// One engine for every agent in the store. Tools and the model do not call back into this actor.
 public actor AgentSession {
     private let store: any EventStore
@@ -179,6 +192,7 @@ public actor AgentSession {
         if profile.archived { throw AgentError.archived }
         await table.prepare(profile.provider)
         let existing = profile.conversationID.map { ConversationID(raw: $0) }
+        await transcript.beginTurn(conversationID: profile.conversationID)
         let requestID = "req_" + UUID().uuidString.lowercased()
         let result = try await engine.submitTurn(text, requestID: requestID, to: existing)
         if profile.conversationID == nil {
@@ -384,19 +398,41 @@ public actor AgentSession {
     }
 
     public func writeWidgetSnapshot(to url: URL) async throws {
-        let items = try await inbox()
+        try await overview(for: nil).widget.write(to: url)
+    }
+
+    /// Reads and decrypts the log once, then derives the inbox, the selected agent's
+    /// transcript, events and usage, and the running count from that single read.
+    public func overview(for id: String?, now: Date = Date()) async throws -> SessionOverview {
+        let all = try await store.readAll()
+        let snapshots = try ConversationSnapshot.all(from: all)
         var running = 0
         for agent in directory.agents where !agent.archived {
-            if let snapshot = try await snapshot(agent.id), snapshot.run?.status == .running || snapshot.run?.status == .suspended {
+            guard let raw = agent.conversationID, let status = snapshots[raw]?.run?.status else { continue }
+            if status == .running || status == .suspended {
                 running += 1
             }
         }
-        let widget = WidgetSnapshot(
-            pendingApprovals: items.count,
-            runningAgents: running,
-            prompts: items.map(\.prompt)
+        var overview = SessionOverview(
+            inbox: ApprovalInbox.pending(events: all, agents: directory.agents, now: now),
+            messages: [],
+            events: [],
+            usage: nil,
+            runningAgents: running
         )
-        try widget.write(to: url)
+        guard let id, let profile = directory.agent(id) else {
+            return overview
+        }
+        guard let raw = profile.conversationID else {
+            overview.usage = UsageSummary(inputTokens: 0, outputTokens: 0, estimatedUSD: 0, note: UsageLedger.note)
+            return overview
+        }
+        let stream = StreamID.conversation(ConversationID(raw: raw))
+        let conversation = all.filter { $0.stream == stream }
+        overview.messages = try conversation.compactMap { try EventCodec.transcriptMessage($0) }
+        overview.events = conversation.map { RunEvent(id: $0.globalSeq, type: $0.type, summary: $0.type) }
+        overview.usage = UsageLedger.summarize(events: conversation, provider: profile.provider.kind)
+        return overview
     }
 
     public func redactionPatterns() -> [RedactionPattern] {

@@ -35,7 +35,7 @@ final class EventKitNotes: NotesClient, @unchecked Sendable {
         guard granted else { return "denied" }
         let existing = try await reminders()
         if let match = existing.first(where: { $0.notes == effectKey }) {
-            return match.calendarItemIdentifier
+            return match.id
         }
         guard let calendar = store.defaultCalendarForNewReminders() else { return "no-calendar" }
         let reminder = EKReminder(eventStore: store)
@@ -46,11 +46,18 @@ final class EventKitNotes: NotesClient, @unchecked Sendable {
         return reminder.calendarItemIdentifier
     }
 
-    private func reminders() async throws -> [EKReminder] {
+    private struct ReminderRef: Sendable {
+        var id: String
+        var notes: String?
+    }
+
+    /// Copies out the fields we need so no `EKReminder` crosses the continuation.
+    private func reminders() async throws -> [ReminderRef] {
         let predicate = store.predicateForReminders(in: nil)
         return try await withCheckedThrowingContinuation { continuation in
             store.fetchReminders(matching: predicate) { reminders in
-                continuation.resume(returning: reminders ?? [])
+                let refs = (reminders ?? []).map { ReminderRef(id: $0.calendarItemIdentifier, notes: $0.notes) }
+                continuation.resume(returning: refs)
             }
         }
     }

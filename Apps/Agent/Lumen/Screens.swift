@@ -42,7 +42,8 @@ struct ApprovalsView: View {
                         }
                     }
                     .padding(.vertical, 4)
-                    .accessibilityElement(children: .combine)
+                    // .contain keeps Approve and Deny reachable as separate buttons.
+                    .accessibilityElement(children: .contain)
                 }
             }
         }
