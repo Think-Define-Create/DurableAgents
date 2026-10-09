@@ -222,6 +222,10 @@ public actor AgentSession {
 
     public func liveTranscript() -> LiveTranscript { transcript }
 
+    /// The engine that owns this store right now. `installMCPTools` and `shred` replace it.
+    /// Do not keep the value inside a tool, and do not call the engine from a tool body.
+    public func currentEngine() -> Engine { engine }
+
     public func liveText(for id: String) async -> String {
         guard let raw = directory.agent(id)?.conversationID else { return "" }
         return await transcript.snapshot(conversationID: raw)

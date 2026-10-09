@@ -21,6 +21,7 @@
 | Signing | App Group `group.dev.thinkdefinecreate.Lumen` | Automatic signing must register the group. There is no `aps-environment` entitlement on purpose. |
 | `Sources/DurableSchedule/AppleWake.swift` | `BGAppRefreshTaskRequest`, `BGProcessingTaskRequest`, `BGTaskScheduler.submit`, `UNUserNotificationCenter.add` | Gated with `canImport(BackgroundTasks)` and `canImport(UserNotifications)`, so Linux does not compile it. iOS 27's `submitTaskRequest` is not called. |
 | Retrieval | `NLContextualEmbedding` | Not called. Linux and the package use `HashEmbedder`. Do not assume a Natural Language embedding API. |
+| `Apps/Assistant` | Same background, notification, Face ID, Keychain, and App Intents calls as the rows above | The Assistant target was not compiled on Linux. iOS 27 names `PrivateCloudComputeLanguageModel`, `submitTaskRequest`, `LongRunningIntent`, and Spotlight retrieval are not in that source. See `Apps/Assistant/UNVERIFIED.md`. |
 
 Not implemented, on purpose:
 

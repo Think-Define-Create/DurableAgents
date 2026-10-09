@@ -271,6 +271,10 @@ public actor SkillLibrary {
         try await load().current.values.sorted { $0.name < $1.name }
     }
 
+    public func pending() async throws -> [SkillProposal] {
+        try await load().pending.values.sorted { $0.id < $1.id }
+    }
+
     /// Level 1. Names and descriptions only.
     public func metadataBlock() async throws -> String {
         let skills = try await list()

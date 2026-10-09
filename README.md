@@ -33,6 +33,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableRetrieval` | Hash embeddings, cosine, and reciprocal-rank fusion. No Apple Natural Language import. |
 | `DurableMemory` | Derived GRDB index of facts and a knowledge graph. The event log stays the source of truth. |
 | `DurablePolicy` | Notification quiet hours, daily cap, and dedupe. Approval rules that cannot clear an external effect while unattended. |
+| `Apps/Assistant` | Assistant, an iOS 26 / macOS 26 app. Target name `AssistantApp`. Not compiled on Linux. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -140,7 +141,11 @@ When `DurableMCPServer` is created with a `MemoryIndex`, it also exposes `create
 
 ## Notification and approval policy
 
-`DurablePolicy` decides whether a local notification is shown and whether a tool call still needs a person. `NotificationPolicy` checks quiet hours first (the same `QuietHours` window as routines: outside it, nothing is sent and the daily cap is not spent), then a dedupe key, then a daily cap counted in that time zone. The decision carries a collapse id. `ApprovalPolicy` takes the first matching rule. A rule can force approval, including by argument and time of day. Unattended mode never auto-approves an external effect, even when a rule says to and even when the tool flag does not require approval. An attended rule may still auto-approve. Rulings are `notification.decided` and `approval.policy` on the `policy` stream, each with a rule id. The engine's own gate is still `Tool.requiresApproval`. Call the journal from the host, not from inside a tool.
+`DurablePolicy` decides whether a local notification is shown and whether a tool call still needs a person. `NotificationPolicy` checks quiet hours first (the same `QuietHours` window as routines: outside it, nothing is sent and the daily cap is not spent), then a dedupe key, then a daily cap counted in that time zone. The decision carries a collapse id. `ApprovalPolicy` takes the first matching rule. A rule can force approval, including by argument and time of day. Unattended mode never auto-approves an external effect, even when a rule says to and even when the tool flag does not require approval. An attended rule may still auto-approve. Rulings are `notification.decided` and `approval.policy` on the `policy` stream, each with a rule id. The engine's own gate is still `Tool.requiresApproval`. Call the journal from the host, not from inside a tool. Assistant uses this for routine notifications and writes an unattended ruling before each catch-up.
+
+## Assistant app
+
+`Apps/Assistant` is a multiplatform SwiftUI app. The Xcode target is `AssistantApp`. It is not part of `swift test`. Open the project on a Mac with Xcode 26. See `Apps/Assistant/UNVERIFIED.md` and `Apps/Assistant/APP_STORE.md`.
 
 ## Routines
 
