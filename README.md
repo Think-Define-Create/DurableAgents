@@ -101,7 +101,11 @@ Denied approvals fail the run. An external effect that reconciles as `.unknown` 
 
 ## Timers and retry
 
-`RetryPolicy.stub` is stored on `run.started`. The engine does not sleep or retry a failed step. `requestTimer(name:fireAt:)` appends `timer.requested` and calls `TimerScheduling`. The default scheduler does nothing. There is no OS wake-up hook yet.
+`RetryPolicy` is stored on `run.started`. `stub` allows one attempt, so a thrown tool error still fails the run. A policy with more attempts retries `pure`, `idempotent`, and `transactional` tools with exponential backoff and optional jitter, and journals `effect.retry` plus a timer. `external` is never retried automatically; recovery still calls `reconcile`.
+
+`requestTimer(name:fireAt:)` appends `timer.requested`. `Engine.pumpTimers()` and `recover()` append `timer.fired` when the engine clock is past the deadline, then continue the run. Pending timers are re-registered with `TimerScheduling` and `BackgroundWakeScheduling` after a restart. On Apple, `BGTaskSchedulerWake` submits a `BGAppRefreshTaskRequest`; the journal remains the source of truth.
+
+Script steps `.sleepUntil` and `.waitSignal` suspend the run. `Engine.signal(_:payload:)` resumes a waiting signal, and a signal that arrives first is kept until the wait starts.
 
 ## Model steps
 

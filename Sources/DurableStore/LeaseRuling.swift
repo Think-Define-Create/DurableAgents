@@ -41,6 +41,8 @@ public final class ManualClock: StoreClock, @unchecked Sendable {
     }
 }
 
+extension ManualClock: DurableClock {}
+
 public protocol ProcessLiveness: Sendable {
     func isAlive(pid: Int32) -> Bool
 }

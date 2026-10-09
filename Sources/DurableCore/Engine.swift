@@ -12,6 +12,9 @@ public actor Engine {
     private let model: (any ModelStep)?
     private let retryPolicy: RetryPolicy
     private let timers: any TimerScheduling
+    private let clock: any DurableClock
+    private let jitter: any JitterSource
+    private let backgroundWake: any BackgroundWakeScheduling
     private let owner: UUID
     private var fence: FenceToken
     private let storeIdentifier: String
@@ -26,6 +29,9 @@ public actor Engine {
         model: (any ModelStep)? = nil,
         retryPolicy: RetryPolicy = .stub,
         timers: any TimerScheduling = NoOpTimerScheduling(),
+        clock: any DurableClock = SystemDurableClock(),
+        jitter: any JitterSource = ZeroJitter(),
+        backgroundWake: any BackgroundWakeScheduling = NoOpBackgroundWake(),
         leaseTTL: Duration = .seconds(30),
         owner: UUID = UUID()
     ) async throws {
@@ -50,6 +56,9 @@ public actor Engine {
         self.model = model
         self.retryPolicy = retryPolicy
         self.timers = timers
+        self.clock = clock
+        self.jitter = jitter
+        self.backgroundWake = backgroundWake
         self.owner = owner
         self.fence = lease.fence
         self.storeIdentifier = try await store.storeID()
@@ -75,6 +84,49 @@ public actor Engine {
                 ),
             ])
             await timers.schedule(name: name, fireAt: fireAt)
+            await backgroundWake.scheduleBackgroundWake(earliest: fireAt, identifier: name)
+        }
+    }
+
+    /// Fires journaled timers whose deadline has passed and continues runs that were waiting on them.
+    public func pumpTimers() async throws -> [RecoveryAction] {
+        try await exclusively {
+            try ensureWritable()
+            try await fireDueTimers()
+            await reschedulePendingTimers()
+            return try await continueRunning()
+        }
+    }
+
+    /// Delivers a named signal. A run blocked on `waitSignal` resumes. A signal with no waiter stays queued.
+    public func signal(_ name: String, payload: JSONValue = .null) async throws -> RecoveryAction? {
+        try await exclusively {
+            try ensureWritable()
+            if name.isEmpty {
+                throw DurableError.invariant("signal name is empty")
+            }
+            _ = try await commit(StreamID("signals"), [
+                EventDraft(
+                    type: EventType.signalDelivered,
+                    payload: .object([
+                        "name": .string(name),
+                        "payload": payload,
+                    ])
+                ),
+            ])
+            let projection = try await load()
+            guard let match = Self.waitingRun(in: projection, kind: "signal", name: name) else {
+                return nil
+            }
+            try await resolveWait(match.conversation, run: match.run, payload: payload)
+            let settled = try await advance(match.conversation.id)
+            return RecoveryAction(
+                conversationID: match.conversation.id,
+                runStatus: settled.runStatus ?? .running,
+                resumeToken: settled.resumeToken,
+                finalText: settled.finalText,
+                failure: settled.failure
+            )
         }
     }
 
@@ -147,6 +199,8 @@ public actor Engine {
     public func recover() async throws -> [RecoveryAction] {
         try await exclusively {
             try ensureWritable()
+            try await fireDueTimers()
+            await reschedulePendingTimers()
             return try await continueRunning()
         }
     }
@@ -233,7 +287,31 @@ public actor Engine {
             }
             if let run = conversation.activeRun {
                 if run.status == .suspended {
+                    if let wait = run.wait, wait.kind == "signal",
+                       let payload = projection.pendingSignals[wait.name]
+                    {
+                        try await resolveWait(conversation, run: run, payload: payload)
+                        continue
+                    }
                     return Self.view(of: conversation)
+                }
+                if let hold = run.retryHold {
+                    if clock.now() < hold.notBefore {
+                        return Self.view(of: conversation)
+                    }
+                    if projection.pendingTimers[hold.timerName] == nil {
+                        _ = try await commit(StreamID("timers"), [
+                            EventDraft(
+                                type: EventType.timerFired,
+                                payload: .object([
+                                    "name": .string(hold.timerName),
+                                    "firedAt": .double(clock.now().timeIntervalSince1970),
+                                ])
+                            ),
+                        ])
+                    }
+                    try await fireDueTimers()
+                    continue
                 }
                 if let inflight = run.inflight {
                     try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
@@ -453,6 +531,52 @@ public actor Engine {
                     ])
                 ),
             ])
+        case .sleepUntil(let date):
+            let name = "sleep-\(run.id.raw)-\(index)"
+            try await armTimer(name: name, fireAt: date)
+            _ = try await commit(.conversation(conversation.id), [
+                EventDraft(
+                    type: EventType.waitStarted,
+                    payload: .object([
+                        "runID": .string(run.id.raw),
+                        "stepIndex": .int(Int64(index)),
+                        "kind": .string("timer"),
+                        "name": .string(name),
+                    ])
+                ),
+            ])
+        case .waitSignal(let name):
+            if name.isEmpty {
+                throw DurableError.invariant("signal name is empty")
+            }
+            let projection = try await load()
+            if let payload = projection.pendingSignals[name] {
+                _ = try await commit(.conversation(conversation.id), [
+                    Self.waitResolvedDraft(run: run, name: name, payload: payload),
+                    EventDraft(
+                        type: EventType.signalConsumed,
+                        payload: .object(["name": .string(name)])
+                    ),
+                    Self.messageDraft(
+                        role: "system",
+                        text: Self.display(payload),
+                        messageID: Self.freshMessageID()
+                    ),
+                    Self.stepDraft(run: run, index: index),
+                ])
+            } else {
+                _ = try await commit(.conversation(conversation.id), [
+                    EventDraft(
+                        type: EventType.waitStarted,
+                        payload: .object([
+                            "runID": .string(run.id.raw),
+                            "stepIndex": .int(Int64(index)),
+                            "kind": .string("signal"),
+                            "name": .string(name),
+                        ])
+                    ),
+                ])
+            }
         case .approval(let approvalID, let prompt):
             if approvalID.isEmpty {
                 throw DurableError.invariant("approval id is empty")
@@ -527,7 +651,12 @@ public actor Engine {
             guard let reconcile = tool.reconcile else {
                 throw DurableError.missingReconcile(tool: tool.name)
             }
-            let context = effectContext(inflight, conversation: conversation, isReplay: true, attempt: 2)
+            let context = effectContext(
+                inflight,
+                conversation: conversation,
+                isReplay: true,
+                attempt: Self.replayAttempt(inflight)
+            )
             let outcome: Reconciliation
             do {
                 outcome = try await reconcile(inflight.key, context)
@@ -556,7 +685,7 @@ public actor Engine {
                     conversation: conversation,
                     run: run,
                     isReplay: true,
-                    attempt: 2
+                    attempt: Self.replayAttempt(inflight)
                 )
             case .unknown(let reason):
                 let token = ResumeToken(
@@ -586,7 +715,7 @@ public actor Engine {
             conversation: conversation,
             run: run,
             isReplay: true,
-            attempt: 2
+            attempt: Self.replayAttempt(inflight)
         )
     }
 
@@ -728,6 +857,28 @@ public actor Engine {
         error: any Error
     ) async throws {
         let reason = String(describing: error)
+        let nextAttempt = max(inflight.attempt, 1) + 1
+        if run.retry.allowsAutomaticRetry(inflight.effect), nextAttempt <= run.retry.maxAttempts {
+            let delay = run.retry.delaySeconds(forAttempt: nextAttempt, jitterUnit: jitter.unit())
+            let fireAt = clock.now().addingTimeInterval(delay)
+            let timerName = "retry-\(inflight.callID.raw)-\(nextAttempt)"
+            _ = try await commit(.conversation(conversation.id), [
+                EventDraft(
+                    type: EventType.effectRetry,
+                    payload: .object([
+                        "runID": .string(run.id.raw),
+                        "callID": .string(inflight.callID.raw),
+                        "attempt": .int(Int64(nextAttempt)),
+                        "fireAt": .double(fireAt.timeIntervalSince1970),
+                        "timerName": .string(timerName),
+                        "kind": .string(inflight.effect.rawValue),
+                        "error": .string(reason),
+                    ])
+                ),
+            ])
+            try await armTimer(name: timerName, fireAt: fireAt)
+            return
+        }
         _ = try await commit(.conversation(conversation.id), [
             Self.resultDraft(
                 run: run,
@@ -746,6 +897,106 @@ public actor Engine {
                 ])
             ),
         ])
+    }
+
+    private func armTimer(name: String, fireAt: Date) async throws {
+        _ = try await commit(StreamID("timers"), [
+            EventDraft(
+                type: EventType.timerRequested,
+                payload: .object([
+                    "name": .string(name),
+                    "fireAt": .double(fireAt.timeIntervalSince1970),
+                ])
+            ),
+        ])
+        await timers.schedule(name: name, fireAt: fireAt)
+        await backgroundWake.scheduleBackgroundWake(earliest: fireAt, identifier: name)
+    }
+
+    private func fireDueTimers() async throws {
+        let now = clock.now()
+        var guardCount = 0
+        while guardCount < 1_000 {
+            guardCount += 1
+            let projection = try await load()
+            let due = projection.pendingTimers.values.filter { $0.fireAt <= now }.map(\.name).sorted()
+            guard let name = due.first else { return }
+            _ = try await commit(StreamID("timers"), [
+                EventDraft(
+                    type: EventType.timerFired,
+                    payload: .object([
+                        "name": .string(name),
+                        "firedAt": .double(now.timeIntervalSince1970),
+                    ])
+                ),
+            ])
+            let again = try await load()
+            if let match = Self.waitingRun(in: again, kind: "timer", name: name) {
+                try await resolveWait(match.conversation, run: match.run, payload: .null)
+            }
+        }
+    }
+
+    private func reschedulePendingTimers() async {
+        let now = clock.now()
+        let projection = try? await load()
+        for timer in projection?.pendingTimers.values.filter({ $0.fireAt > now }) ?? [] {
+            await timers.schedule(name: timer.name, fireAt: timer.fireAt)
+            await backgroundWake.scheduleBackgroundWake(earliest: timer.fireAt, identifier: timer.name)
+        }
+    }
+
+    private func resolveWait(
+        _ conversation: FoldedConversation,
+        run: FoldedRun,
+        payload: JSONValue
+    ) async throws {
+        guard let wait = run.wait else { return }
+        var drafts = [
+            Self.waitResolvedDraft(run: run, name: wait.name, payload: payload),
+            Self.stepDraft(run: run, index: wait.stepIndex),
+        ]
+        if wait.kind == "signal" {
+            drafts.append(EventDraft(
+                type: EventType.signalConsumed,
+                payload: .object(["name": .string(wait.name)])
+            ))
+            drafts.append(Self.messageDraft(
+                role: "system",
+                text: Self.display(payload),
+                messageID: Self.freshMessageID()
+            ))
+        }
+        _ = try await commit(.conversation(conversation.id), drafts)
+    }
+
+    private static func waitingRun(
+        in projection: Projection,
+        kind: String,
+        name: String
+    ) -> (conversation: FoldedConversation, run: FoldedRun)? {
+        for key in projection.conversationOrder {
+            guard let conversation = projection.conversations[key], let run = conversation.activeRun,
+                  let wait = run.wait, wait.kind == kind, wait.name == name
+            else { continue }
+            return (conversation, run)
+        }
+        return nil
+    }
+
+    private static func waitResolvedDraft(run: FoldedRun, name: String, payload: JSONValue) -> EventDraft {
+        EventDraft(
+            type: EventType.waitResolved,
+            payload: .object([
+                "runID": .string(run.id.raw),
+                "name": .string(name),
+                "payload": payload,
+            ])
+        )
+    }
+
+    private static func replayAttempt(_ inflight: InflightEffect) -> Int {
+        inflight.attempt > 1 ? inflight.attempt : 2
     }
 
     private func effectContext(

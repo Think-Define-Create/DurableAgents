@@ -7,6 +7,24 @@ struct InflightEffect: Equatable {
     var effect: EffectKind
     var key: EffectKey
     var arguments: JSONValue
+    var attempt: Int = 1
+}
+
+struct RetryHold: Equatable {
+    var attempt: Int
+    var notBefore: Date
+    var timerName: String
+}
+
+struct PendingWait: Equatable {
+    var kind: String
+    var name: String
+    var stepIndex: Int
+}
+
+struct PendingTimer: Equatable {
+    var name: String
+    var fireAt: Date
 }
 
 enum ApprovalPurpose: String, Equatable {
@@ -52,6 +70,8 @@ struct FoldedRun {
     var plannedStep: ScriptedStep?
     var plannedIndex: Int?
     var grantedApprovalIDs: [String] = []
+    var retryHold: RetryHold?
+    var wait: PendingWait?
     var finalText: String?
     var failure: String?
 }
@@ -83,6 +103,8 @@ struct Projection {
     var conversations: [String: FoldedConversation] = [:]
     var conversationOrder: [String] = []
     var values: [String: JSONValue] = [:]
+    var pendingTimers: [String: PendingTimer] = [:]
+    var pendingSignals: [String: JSONValue] = [:]
 
     static func fold(_ events: [EventEnvelope]) throws -> Projection {
         var projection = Projection()
@@ -99,7 +121,64 @@ struct Projection {
     mutating func apply(_ event: EventEnvelope) throws {
         switch event.type {
         case EventType.timerRequested:
-            return
+            let name = event.payload["name"]?.stringValue ?? "timer-\(event.globalSeq)"
+            let seconds = event.payload["fireAt"].flatMap { try? JSONNumbers.double($0) } ?? 0
+            pendingTimers[name] = PendingTimer(name: name, fireAt: Date(timeIntervalSince1970: seconds))
+        case EventType.timerFired:
+            let name = event.payload["name"]?.stringValue
+            if let name {
+                pendingTimers.removeValue(forKey: name)
+                for key in Array(conversations.keys) {
+                    var conversation = conversations[key] ?? FoldedConversation(id: ConversationID(raw: key))
+                    for runID in conversation.runOrder {
+                        guard var run = conversation.runs[runID], run.retryHold?.timerName == name else { continue }
+                        run.retryHold = nil
+                        conversation.runs[runID] = run
+                    }
+                    conversations[key] = conversation
+                }
+            }
+        case EventType.signalDelivered:
+            if let name = event.payload["name"]?.stringValue {
+                pendingSignals[name] = event.payload["payload"] ?? .null
+            }
+        case EventType.signalConsumed:
+            if let name = event.payload["name"]?.stringValue {
+                pendingSignals.removeValue(forKey: name)
+            }
+        case EventType.effectRetry:
+            guard let attempt = event.payload["attempt"]?.intValue,
+                  let timerName = event.payload["timerName"]?.stringValue,
+                  let fireAt = event.payload["fireAt"]
+            else {
+                throw DurableError.invariant("effect.retry is missing fields at seq \(event.globalSeq)")
+            }
+            let when = Date(timeIntervalSince1970: try JSONNumbers.double(fireAt))
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.retryHold = RetryHold(attempt: Int(attempt), notBefore: when, timerName: timerName)
+                if var inflight = run.inflight {
+                    inflight.attempt = Int(attempt)
+                    run.inflight = inflight
+                }
+            }
+        case EventType.waitStarted:
+            guard let kind = event.payload["kind"]?.stringValue,
+                  let name = event.payload["name"]?.stringValue,
+                  let stepIndex = event.payload["stepIndex"]?.intValue
+            else {
+                throw DurableError.invariant("wait.started is missing fields at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.wait = PendingWait(kind: kind, name: name, stepIndex: Int(stepIndex))
+                run.status = .suspended
+            }
+        case EventType.waitResolved:
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.wait = nil
+                if run.pending == nil, run.status == .suspended {
+                    run.status = .running
+                }
+            }
         case EventType.stateWrote:
             guard let namespace = event.payload["namespace"]?.stringValue,
                   let key = event.payload["key"]?.stringValue,
@@ -263,6 +342,8 @@ struct Projection {
                 run.failure = reason
                 run.inflight = nil
                 run.pending = nil
+                run.retryHold = nil
+                run.wait = nil
             }
         default:
             throw DurableError.invariant("unknown event type \(event.type) at seq \(event.globalSeq)")

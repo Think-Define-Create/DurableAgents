@@ -15,6 +15,12 @@ public enum EventType {
     public static let messageAppended = "message.appended"
     public static let stateWrote = "state.wrote"
     public static let timerRequested = "timer.requested"
+    public static let timerFired = "timer.fired"
+    public static let effectRetry = "effect.retry"
+    public static let waitStarted = "wait.started"
+    public static let waitResolved = "wait.resolved"
+    public static let signalDelivered = "signal.delivered"
+    public static let signalConsumed = "signal.consumed"
 
     public static let messageAppendedCurrentVersion = 2
 }
@@ -125,25 +131,53 @@ public struct TranscriptMessage: Sendable, Equatable {
     }
 }
 
-/// Recorded on `run.started`. This milestone does not sleep or re-enter a failed step.
+/// Recorded on `run.started`. Automatic retries apply only to `automaticKinds`.
+/// External effects follow reconcile, not this backoff.
 public struct RetryPolicy: Sendable, Equatable {
     public var maxAttempts: Int
     public var initialBackoffSeconds: Double
     public var multiplier: Double
+    /// Fraction of the backoff added or subtracted. `0` keeps the delay exact.
+    public var jitterRatio: Double
+    public var automaticKinds: Set<EffectKind>
 
-    public init(maxAttempts: Int, initialBackoffSeconds: Double, multiplier: Double) {
+    public init(
+        maxAttempts: Int,
+        initialBackoffSeconds: Double,
+        multiplier: Double,
+        jitterRatio: Double = 0,
+        automaticKinds: Set<EffectKind> = [.pure, .idempotent, .transactional]
+    ) {
         self.maxAttempts = maxAttempts
         self.initialBackoffSeconds = initialBackoffSeconds
         self.multiplier = multiplier
+        self.jitterRatio = jitterRatio
+        self.automaticKinds = automaticKinds
     }
 
+    /// One attempt, so a thrown tool error fails the run. Kept for existing journals.
     public static let stub = RetryPolicy(maxAttempts: 1, initialBackoffSeconds: 1, multiplier: 2)
+
+    public func allowsAutomaticRetry(_ kind: EffectKind) -> Bool {
+        automaticKinds.contains(kind) && kind != .external
+    }
+
+    /// `attempt` is the try that is about to start. The first retry is attempt 2.
+    public func delaySeconds(forAttempt attempt: Int, jitterUnit: Double) -> Double {
+        let exponent = Double(max(0, attempt - 2))
+        let base = initialBackoffSeconds * pow(multiplier, exponent)
+        let unit = min(1, max(0, jitterUnit))
+        let delta = base * jitterRatio * (unit * 2 - 1)
+        return max(0, base + delta)
+    }
 
     func json() -> JSONValue {
         .object([
             "maxAttempts": .int(Int64(maxAttempts)),
             "initialBackoffSeconds": .double(initialBackoffSeconds),
             "multiplier": .double(multiplier),
+            "jitterRatio": .double(jitterRatio),
+            "automaticKinds": .array(automaticKinds.map { .string($0.rawValue) }.sorted { $0.canonicalJSON() < $1.canonicalJSON() }),
         ])
     }
 
@@ -155,12 +189,55 @@ public struct RetryPolicy: Sendable, Equatable {
         else {
             throw DurableError.invariant("retry policy payload is incomplete")
         }
+        let jitter = try fields["jitterRatio"].map { try JSONNumbers.double($0) } ?? 0
+        let kinds: Set<EffectKind>
+        if let listed = fields["automaticKinds"]?.arrayValue {
+            kinds = Set(listed.compactMap { item in
+                item.stringValue.flatMap(EffectKind.init(rawValue:))
+            })
+        } else {
+            kinds = [.pure, .idempotent, .transactional]
+        }
         return RetryPolicy(
             maxAttempts: Int(maxAttempts),
             initialBackoffSeconds: try JSONNumbers.double(initial),
-            multiplier: try JSONNumbers.double(multiplier)
+            multiplier: try JSONNumbers.double(multiplier),
+            jitterRatio: jitter,
+            automaticKinds: kinds
         )
     }
+}
+
+public protocol DurableClock: Sendable {
+    func now() -> Date
+}
+
+public struct SystemDurableClock: DurableClock {
+    public init() {}
+
+    public func now() -> Date { Date() }
+}
+
+public protocol JitterSource: Sendable {
+    /// A unit in `0...1` mixed into the backoff.
+    func unit() -> Double
+}
+
+public struct ZeroJitter: JitterSource {
+    public init() {}
+
+    public func unit() -> Double { 0 }
+}
+
+/// Host hook for an OS wake. The journal is still the source of truth; `Engine.pumpTimers` fires due timers.
+public protocol BackgroundWakeScheduling: Sendable {
+    func scheduleBackgroundWake(earliest date: Date, identifier: String) async
+}
+
+public struct NoOpBackgroundWake: BackgroundWakeScheduling {
+    public init() {}
+
+    public func scheduleBackgroundWake(earliest date: Date, identifier: String) async {}
 }
 
 enum JSONNumbers {
@@ -192,6 +269,10 @@ public enum ScriptedStep: Sendable, Equatable {
     case tool(name: String, callID: String, arguments: JSONValue)
     case approval(id: String, prompt: String)
     case finish(String)
+    /// Suspend until `Engine.pumpTimers` (or recover) passes this instant.
+    case sleepUntil(Date)
+    /// Suspend until `Engine.signal(_:payload:)` delivers `name`.
+    case waitSignal(name: String)
 
     var canonical: String {
         switch self {
@@ -203,6 +284,10 @@ public enum ScriptedStep: Sendable, Equatable {
             return "approval:\(id):\(prompt)"
         case .finish(let text):
             return "finish:\(text)"
+        case .sleepUntil(let date):
+            return "sleep:\(date.timeIntervalSince1970)"
+        case .waitSignal(let name):
+            return "signal:\(name)"
         }
     }
 
@@ -225,6 +310,13 @@ public enum ScriptedStep: Sendable, Equatable {
             ])
         case .finish(let text):
             return .object(["type": .string("finish"), "text": .string(text)])
+        case .sleepUntil(let date):
+            return .object([
+                "type": .string("sleepUntil"),
+                "at": .double(date.timeIntervalSince1970),
+            ])
+        case .waitSignal(let name):
+            return .object(["type": .string("waitSignal"), "name": .string(name)])
         }
     }
 
@@ -255,6 +347,16 @@ public enum ScriptedStep: Sendable, Equatable {
                 throw DurableError.invariant("finish step is missing text")
             }
             return .finish(text)
+        case "sleepUntil":
+            guard let at = fields["at"] else {
+                throw DurableError.invariant("sleep step is missing at")
+            }
+            return .sleepUntil(Date(timeIntervalSince1970: try JSONNumbers.double(at)))
+        case "waitSignal":
+            guard let name = fields["name"]?.stringValue, !name.isEmpty else {
+                throw DurableError.invariant("wait step is missing name")
+            }
+            return .waitSignal(name: name)
         default:
             throw DurableError.invariant("unknown script step \(type)")
         }
