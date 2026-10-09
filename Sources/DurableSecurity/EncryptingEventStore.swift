@@ -8,11 +8,20 @@ public actor EncryptingEventStore: EventStore {
     public let inner: any EventStore
     private let keys: any ConversationKeyProvider
     private let redactor: any PayloadRedactor
+    /// When true, streams whose key was shredded are omitted from reads so the rest of the store still opens.
+    /// The ciphertext stays in `inner`. Default is false: a shredded stream fails the read.
+    private let omitShredded: Bool
 
-    public init(inner: any EventStore, keys: any ConversationKeyProvider, redactor: any PayloadRedactor = PassThroughRedactor()) {
+    public init(
+        inner: any EventStore,
+        keys: any ConversationKeyProvider,
+        redactor: any PayloadRedactor = PassThroughRedactor(),
+        omitShredded: Bool = false
+    ) {
         self.inner = inner
         self.keys = keys
         self.redactor = redactor
+        self.omitShredded = omitShredded
     }
 
     public func storeID() async throws -> String {
@@ -76,9 +85,25 @@ public actor EncryptingEventStore: EventStore {
         var opened: [EventEnvelope] = []
         opened.reserveCapacity(events.count)
         for event in events {
-            opened.append(try await decrypt(event))
+            do {
+                opened.append(try await decrypt(event))
+            } catch let error as SecurityError {
+                if omitShredded, Self.isShredded(error) {
+                    continue
+                }
+                throw error
+            }
         }
         return opened
+    }
+
+    private static func isShredded(_ error: SecurityError) -> Bool {
+        switch error {
+        case .shredded, .missingKey:
+            return true
+        case .malformedCiphertext:
+            return false
+        }
     }
 
     private func decrypt(_ event: EventEnvelope) async throws -> EventEnvelope {

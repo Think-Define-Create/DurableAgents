@@ -76,7 +76,7 @@ public actor FileKeyProvider: ConversationKeyProvider {
     }
 
     public func loadKey(for scope: String) async throws -> Data {
-        if shredded.contains(scope) {
+        if shredded.contains(scope) || FileManager.default.fileExists(atPath: tombstoneURL(scope).path) {
             throw SecurityError.shredded(scope)
         }
         let url = fileURL(scope)
@@ -98,13 +98,21 @@ public actor FileKeyProvider: ConversationKeyProvider {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+        try Data().write(to: tombstoneURL(scope), options: .atomic)
+    }
+
+    private func tombstoneURL(_ scope: String) -> URL {
+        directory.appendingPathComponent(fileName(scope) + ".shredded")
     }
 
     private func fileURL(_ scope: String) -> URL {
-        let name = scope.map { character -> Character in
+        directory.appendingPathComponent(fileName(scope) + ".key")
+    }
+
+    private func fileName(_ scope: String) -> String {
+        String(scope.map { character -> Character in
             character.isLetter || character.isNumber ? character : "_"
-        }
-        return directory.appendingPathComponent(String(name) + ".key")
+        })
     }
 }
 

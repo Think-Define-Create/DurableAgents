@@ -22,6 +22,7 @@ let package = Package(
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
         .library(name: "DurableDelivery", targets: ["DurableDelivery"]),
         .library(name: "DurableMCP", targets: ["DurableMCP"]),
+        .library(name: "AgentAppCore", targets: ["AgentAppCore"]),
         .executable(name: "mcp-fixture", targets: ["MCPFixture"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
@@ -235,6 +236,34 @@ let package = Package(
                 "DurableStore",
                 "MCPFixture",
                 .product(name: "MCP", package: "swift-sdk"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "AgentAppCore",
+            dependencies: [
+                "DurableCore",
+                "PiAI",
+                "PiAgent",
+                "DurableSecurity",
+                "DurableMCP",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "AgentAppCoreTests",
+            dependencies: [
+                "AgentAppCore",
+                "DurableCore",
+                "DurableStore",
+                "DurableSecurity",
+                "DurableMCP",
+                "PiAI",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
