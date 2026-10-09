@@ -24,7 +24,7 @@ flowchart TD
 
 One `Engine` owns the store lease. Creating a second `ConversationModel` on the same file would fail that lease, so the app does not. Changing the tool list, including a new MCP server, closes the engine and opens a new one, then calls `recover()`.
 
-The model step must not call the engine. Streaming text is written to a separate `LiveTranscript` actor while `PiAgentStep` is inside the engine lock. The chat polls that actor.
+The model step must not call the engine. Streaming text is written to a separate `LiveTranscript` actor while `AgentLoopStep` is inside the engine lock. The chat polls that actor.
 
 ## Feature map
 
@@ -32,7 +32,7 @@ The model step must not call the engine. Streaming text is written to a separate
 |---|---|
 | Agent list, create, archive | `AgentDirectory` sidecar next to the sqlite file. Archive is not an event. |
 | Fork | `Engine.fork` |
-| Chat send | `Engine.submitTurn` through `RoutingModelStep` and `PiAgentStep` |
+| Chat send | `Engine.submitTurn` through `RoutingModelStep` and `AgentLoopStep` |
 | Recovered banner | `Engine.recover` on launch. The banner shows when that returns any action. |
 | Provider picker | `ProviderChoice`: scripted demo, Apple, Anthropic Messages, OpenAI Responses, OpenAI-compatible chat (`xAI`, `Groq`, `OpenRouter`, `Ollama` base URLs) |
 | Live reply | `PublishingProvider` and `LiveTranscript` |

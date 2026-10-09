@@ -6,7 +6,7 @@ import DurableSecurity
 import DurableStore
 import Foundation
 import Observation
-import PiAI
+import ModelKit
 
 #if canImport(UserNotifications)
 import UserNotifications

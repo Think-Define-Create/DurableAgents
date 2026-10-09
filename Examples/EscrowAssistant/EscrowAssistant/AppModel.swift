@@ -5,8 +5,8 @@ import DurableSecurity
 import DurableStore
 import Foundation
 import Observation
-import PiAgent
-import PiAI
+import AgentLoop
+import ModelKit
 import UserNotifications
 
 enum EscrowProvider: String, CaseIterable, Identifiable {
@@ -307,7 +307,7 @@ final class AppModel {
         case .scripted:
             return (EscrowScriptedModel(), "Scripted planner")
         case .anthropic:
-            let step = gated(PiAgentStep(
+            let step = gated(AgentLoopStep(
                 provider: AnthropicMessages(
                     apiKey: NamedSecret(account: "ANTHROPIC_API_KEY"),
                     secrets: secretStore()
@@ -315,9 +315,9 @@ final class AppModel {
                 modelName: "claude-sonnet-4-5",
                 instructions: instructions
             ))
-            return (step, "Anthropic via PiAgent. Key: ANTHROPIC_API_KEY")
+            return (step, "Anthropic via AgentLoop. Key: ANTHROPIC_API_KEY")
         case .openai:
-            let step = gated(PiAgentStep(
+            let step = gated(AgentLoopStep(
                 provider: OpenAIResponses(
                     apiKey: NamedSecret(account: "OPENAI_API_KEY"),
                     secrets: secretStore()
@@ -325,11 +325,11 @@ final class AppModel {
                 modelName: "gpt-4.1",
                 instructions: instructions
             ))
-            return (step, "OpenAI via PiAgent. Key: OPENAI_API_KEY")
+            return (step, "OpenAI via AgentLoop. Key: OPENAI_API_KEY")
         case .apple:
             #if canImport(FoundationModels)
             if #available(iOS 26, macOS 26, *), FoundationModelsStep.isAvailable() {
-                let step = gated(PiAgentStep(
+                let step = gated(AgentLoopStep(
                     provider: FoundationModelsProvider(
                         instructions: instructions,
                         makeTools: { capture in
@@ -343,7 +343,7 @@ final class AppModel {
                     modelName: "apple-on-device",
                     instructions: instructions
                 ))
-                return (step, "Apple on-device via PiAgent")
+                return (step, "Apple on-device via AgentLoop")
             }
             let reason = FoundationModelsStep.unavailableReason() ?? "The on-device model is unavailable."
             return (EscrowScriptedModel(), "Scripted fallback. \(reason)")
@@ -361,14 +361,14 @@ final class AppModel {
         #endif
     }
 
-    private static func gated(_ step: PiAgentStep) -> any ModelStep {
+    private static func gated(_ step: AgentLoopStep) -> any ModelStep {
         ClosingApprovalGate(inner: step)
     }
 }
 
 /// Holds scheduleClosing until this run has the closing approval.
 private struct ClosingApprovalGate: ModelStep {
-    var inner: PiAgentStep
+    var inner: AgentLoopStep
 
     func plan(context: ModelContext) async throws -> ScriptedStep {
         let step = try await inner.plan(context: context)

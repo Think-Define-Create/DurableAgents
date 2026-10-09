@@ -31,7 +31,7 @@ public struct EnvironmentSecretStore: SecretStore {
     public func secret(for reference: any SecretReference) async throws -> String {
         let name = reference.account
         guard let value = ProcessInfo.processInfo.environment[name], !value.isEmpty else {
-            throw PiAIError.missingSecret(name)
+            throw ModelKitError.missingSecret(name)
         }
         return value
     }
@@ -67,7 +67,7 @@ public struct KeychainSecretStore: SecretStore {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty else {
-            throw PiAIError.missingSecret(reference.account)
+            throw ModelKitError.missingSecret(reference.account)
         }
         return value
     }

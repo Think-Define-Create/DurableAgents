@@ -1,5 +1,5 @@
 import Foundation
-import PiAI
+import ModelKit
 import Security
 
 struct KeychainError: Error, CustomStringConvertible {
@@ -22,7 +22,7 @@ struct KeychainSecretStore: SecretStore {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data, let text = String(data: data, encoding: .utf8), !text.isEmpty else {
-            throw PiAIError.missingSecret(reference.account)
+            throw ModelKitError.missingSecret(reference.account)
         }
         return text
     }

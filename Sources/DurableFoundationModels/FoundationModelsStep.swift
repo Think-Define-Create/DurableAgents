@@ -1,6 +1,6 @@
 import DurableCore
 import Foundation
-import PiAI
+import ModelKit
 
 public enum FoundationModelsSupport {
     #if canImport(FoundationModels)
@@ -197,7 +197,7 @@ public struct FoundationModelsStep: ModelStep {
     }
 }
 
-/// On-device provider for `PiAgentStep`. One `streamResponse` call is one checkpoint.
+/// On-device provider for `AgentLoopStep`. One `streamResponse` call is one checkpoint.
 /// Text streams as deltas so the UI can show it while the model is still generating.
 @available(iOS 26, macOS 26, *)
 public struct FoundationModelsProvider: ModelProvider {

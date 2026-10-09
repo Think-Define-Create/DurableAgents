@@ -2,8 +2,8 @@ import DurableCore
 import DurableFoundationModels
 import DurableStore
 import Foundation
-import PiAgent
-import PiAI
+import AgentLoop
+import ModelKit
 import Testing
 
 final class QueueProvider: ModelProvider, @unchecked Sendable {
@@ -105,7 +105,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let engine = try await Engine(
         store: store,
         tools: [pure, other],
-        model: PiAgentStep(provider: parallel, modelName: "scripted", instructions: "Be brief.")
+        model: AgentLoopStep(provider: parallel, modelName: "scripted", instructions: "Be brief.")
     )
     let result = try await engine.submitTurn("Find both", requestID: "req-parallel")
     #expect(result.runStatus == .completed)
@@ -123,7 +123,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let serialEngine = try await Engine(
         store: InMemoryEventStore(),
         tools: [side, external],
-        model: PiAgentStep(provider: serial, modelName: "scripted")
+        model: AgentLoopStep(provider: serial, modelName: "scripted")
     )
     let mailed = try await serialEngine.submitTurn("Send it", requestID: "req-serial")
     #expect(mailed.runStatus == .completed)
@@ -151,7 +151,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let engine = try await Engine(
         store: store,
         tools: [lookup, crash],
-        model: PiAgentStep(provider: provider, modelName: "scripted")
+        model: AgentLoopStep(provider: provider, modelName: "scripted")
     )
     await #expect(throws: SimulatedProcessCrash.self) {
         try await engine.submitTurn("Find both", requestID: "req-crash")
@@ -160,7 +160,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let restarted = try await Engine(
         store: store,
         tools: [lookup, crash],
-        model: PiAgentStep(provider: provider, modelName: "scripted")
+        model: AgentLoopStep(provider: provider, modelName: "scripted")
     )
     let actions = try await restarted.recover()
     #expect(actions.contains { $0.runStatus == .completed && $0.finalText == "recovered" })
@@ -189,7 +189,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let agent = try await Engine(
         store: store,
         tools: [],
-        model: PiAgentStep(
+        model: AgentLoopStep(
             provider: provider,
             modelName: "scripted",
             compactAfterMessages: 2,
@@ -246,7 +246,7 @@ private func finish(_ text: String) -> [ModelStreamEvent] {
     let engine = try await Engine(
         store: InMemoryEventStore(),
         tools: [research],
-        model: PiAgentStep(
+        model: AgentLoopStep(
             provider: provider,
             modelName: "scripted",
             subagentTools: ["research"]

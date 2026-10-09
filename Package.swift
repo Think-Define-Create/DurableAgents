@@ -2,7 +2,7 @@
 
 import PackageDescription
 
-// DurableAgents (working name: PiSwift).
+// DurableAgents.
 // DurableFoundationModels compiles on Linux as a stub. The Apple framework is
 // wrapped in canImport(FoundationModels) and availability checks.
 
@@ -17,8 +17,8 @@ let package = Package(
         .library(name: "DurableStore", targets: ["DurableStore"]),
         .library(name: "DurableKit", targets: ["DurableKit"]),
         .library(name: "DurableFoundationModels", targets: ["DurableFoundationModels"]),
-        .library(name: "PiAI", targets: ["PiAI"]),
-        .library(name: "PiAgent", targets: ["PiAgent"]),
+        .library(name: "ModelKit", targets: ["ModelKit"]),
+        .library(name: "AgentLoop", targets: ["AgentLoop"]),
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
         .library(name: "DurableDelivery", targets: ["DurableDelivery"]),
         .library(name: "DurableMCP", targets: ["DurableMCP"]),
@@ -26,8 +26,8 @@ let package = Package(
         .executable(name: "mcp-fixture", targets: ["MCPFixture"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
-        .library(name: "PiDurableImport", targets: ["PiDurableImport"]),
-        .executable(name: "pi-durable-import", targets: ["PiDurableImportCLI"]),
+        .library(name: "DurableImport", targets: ["DurableImport"]),
+        .executable(name: "durable-import", targets: ["DurableImportCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -63,7 +63,7 @@ let package = Package(
         ),
         .target(
             name: "DurableFoundationModels",
-            dependencies: ["DurableCore", "PiAI"],
+            dependencies: ["DurableCore", "ModelKit"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -93,14 +93,14 @@ let package = Package(
             ]
         ),
         .target(
-            name: "PiAgent",
-            dependencies: ["DurableCore", "PiAI"],
+            name: "AgentLoop",
+            dependencies: ["DurableCore", "ModelKit"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
         ),
         .target(
-            name: "PiAI",
+            name: "ModelKit",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -113,15 +113,15 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "PiAgentTests",
-            dependencies: ["PiAgent", "PiAI", "DurableCore", "DurableStore", "DurableFoundationModels"],
+            name: "AgentLoopTests",
+            dependencies: ["AgentLoop", "ModelKit", "DurableCore", "DurableStore", "DurableFoundationModels"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
         ),
         .testTarget(
-            name: "PiAITests",
-            dependencies: ["PiAI"],
+            name: "ModelKitTests",
+            dependencies: ["ModelKit"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -162,7 +162,7 @@ let package = Package(
             ]
         ),
         .target(
-            name: "PiDurableImport",
+            name: "DurableImport",
             dependencies: [
                 "DurableCore",
                 "DurableStore",
@@ -173,9 +173,9 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "PiDurableImportCLI",
+            name: "DurableImportCLI",
             dependencies: [
-                "PiDurableImport",
+                "DurableImport",
                 "DurableCore",
                 "DurableStore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -185,8 +185,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "PiDurableImportTests",
-            dependencies: ["PiDurableImport", "DurableCore", "DurableStore", "PiDurableImportCLI"],
+            name: "DurableImportTests",
+            dependencies: ["DurableImport", "DurableCore", "DurableStore", "DurableImportCLI"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -245,8 +245,8 @@ let package = Package(
             name: "AgentAppCore",
             dependencies: [
                 "DurableCore",
-                "PiAI",
-                "PiAgent",
+                "ModelKit",
+                "AgentLoop",
                 "DurableSecurity",
                 "DurableMCP",
                 .product(name: "MCP", package: "swift-sdk"),
@@ -263,7 +263,7 @@ let package = Package(
                 "DurableStore",
                 "DurableSecurity",
                 "DurableMCP",
-                "PiAI",
+                "ModelKit",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

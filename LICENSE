@@ -24,7 +24,7 @@ SOFTWARE.
 
 Inspiration notice
 
-DurableAgents (working name: PiSwift) is an original implementation. Its
+DurableAgents is an original implementation. Its
 durability model is inspired by Pi and Pi Durable, MIT licensed:
 
 Copyright (c) 2025 Mario Zechner

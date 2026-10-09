@@ -4,14 +4,14 @@ enum JSONWalk {
     static func object(data: Data) throws -> [String: Any] {
         let parsed = try JSONSerialization.jsonObject(with: data)
         guard let fields = parsed as? [String: Any] else {
-            throw PiAIError.malformed("expected a JSON object")
+            throw ModelKitError.malformed("expected a JSON object")
         }
         return fields
     }
 
     static func object(text: String) throws -> [String: Any] {
         guard let data = text.data(using: .utf8) else {
-            throw PiAIError.malformed("arguments are not UTF-8")
+            throw ModelKitError.malformed("arguments are not UTF-8")
         }
         return try object(data: data)
     }
@@ -50,7 +50,7 @@ enum ProviderHTTP {
             root.removeLast()
         }
         guard let url = URL(string: root + path) else {
-            throw PiAIError.malformed("bad base URL \(base.absoluteString)")
+            throw ModelKitError.malformed("bad base URL \(base.absoluteString)")
         }
         return url
     }

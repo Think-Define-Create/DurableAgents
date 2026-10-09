@@ -73,7 +73,7 @@ public enum ImportError: Error, Sendable, Equatable, CustomStringConvertible {
 /// The source schema is `@earendil-works/pi-durable` version 1 (`packages/durable/src/storage/sqlite/migrations.ts`):
 /// `durable_metadata`, `record_ids`, `conversations`, `entries`, `tasks`, `submissions`,
 /// `documents`, `document_revisions`, plus the `durable_schema` version row.
-public enum PiDurableImporter {
+public enum DurableImporter {
     public static let supportedSchemaVersion = 1
     public static let domainTables = [
         "durable_metadata",
@@ -379,12 +379,12 @@ private func readSnapshot(_ db: Database) throws -> SourceSnapshot {
     guard let version = try Int.fetchOne(db, sql: "SELECT version FROM durable_schema WHERE singleton = 1") else {
         throw ImportError.schema("durable_schema has no version row")
     }
-    guard version == PiDurableImporter.supportedSchemaVersion else {
+    guard version == DurableImporter.supportedSchemaVersion else {
         throw ImportError.schema(
-            "schema version \(version) is not supported (this importer reads version \(PiDurableImporter.supportedSchemaVersion))"
+            "schema version \(version) is not supported (this importer reads version \(DurableImporter.supportedSchemaVersion))"
         )
     }
-    for name in PiDurableImporter.domainTables {
+    for name in DurableImporter.domainTables {
         guard try tableExists(db, name) else {
             throw ImportError.schema("missing table \(name)")
         }
@@ -404,7 +404,7 @@ private func readSnapshot(_ db: Database) throws -> SourceSnapshot {
         ),
     ]
     let names = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-    let known = Set(PiDurableImporter.domainTables + ["durable_schema"])
+    let known = Set(DurableImporter.domainTables + ["durable_schema"])
     let extra = names.filter { !known.contains($0) && !$0.hasPrefix("sqlite_") }
     if !extra.isEmpty {
         losses.append(ImportLoss(code: "extra-tables", detail: extra.joined(separator: ", ")))
@@ -540,3 +540,6 @@ private func tableExists(_ db: Database, _ name: String) throws -> Bool {
         arguments: [name]
     ) ?? 0 > 0
 }
+
+@available(*, deprecated, renamed: "DurableImporter")
+public typealias PiDurableImporter = DurableImporter

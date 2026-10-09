@@ -1,7 +1,7 @@
 import DurableCore
 import Foundation
-import PiAgent
-import PiAI
+import AgentLoop
+import ModelKit
 
 public actor LiveTranscript {
     private var text: [String: String] = [:]
@@ -165,7 +165,7 @@ public struct RoutingModelStep: ModelStep {
         let provider = makeProvider(choice)
         builds.count += 1
         let publishing = PublishingProvider(inner: provider, transcript: transcript, conversationID: context.conversationID.raw)
-        let step = PiAgentStep(
+        let step = AgentLoopStep(
             provider: publishing,
             modelName: choice.model,
             instructions: "You are Lumen, a personal agent. Use tools when they help. Do not invent tool results."

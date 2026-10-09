@@ -1,6 +1,6 @@
 import Foundation
 
-public enum PiAIError: Error, Sendable, Equatable, CustomStringConvertible {
+public enum ModelKitError: Error, Sendable, Equatable, CustomStringConvertible {
     case missingSecret(String)
     case http(status: Int, body: String)
     case malformed(String)
@@ -221,3 +221,6 @@ public struct ScriptedProvider: ModelProvider {
         }
     }
 }
+
+@available(*, deprecated, renamed: "ModelKitError")
+public typealias PiAIError = ModelKitError

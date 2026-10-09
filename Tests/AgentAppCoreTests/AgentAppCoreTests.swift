@@ -4,7 +4,7 @@ import DurableMCP
 import DurableSecurity
 import DurableStore
 import Foundation
-import PiAI
+import ModelKit
 import Testing
 
 #if canImport(Glibc)

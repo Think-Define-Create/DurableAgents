@@ -43,7 +43,7 @@ public struct OpenAIResponses: ModelProvider {
         return StreamLoop.open(transport: transport, request: {
             let key = try await secrets.secret(for: apiKey)
             guard !key.isEmpty else {
-                throw PiAIError.missingSecret(apiKey.account)
+                throw ModelKitError.missingSecret(apiKey.account)
             }
             let body = try ResponsesEncoding.body(for: request)
             return HTTPRequest(
@@ -153,7 +153,7 @@ private struct ResponsesAccumulator: SSEReducing {
         case "response.completed", "response.incomplete", "response.failed":
             return completion(json)
         case "error":
-            throw PiAIError.malformed(JSONWalk.string(json["message"]) ?? data)
+            throw ModelKitError.malformed(JSONWalk.string(json["message"]) ?? data)
         default:
             return []
         }

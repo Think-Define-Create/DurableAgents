@@ -1,14 +1,14 @@
 import Foundation
 import Testing
 
-@testable import PiAI
+@testable import ModelKit
 
 private struct StaticSecretStore: SecretStore {
     var value: String
 
     func secret(for reference: any SecretReference) async throws -> String {
         if value.isEmpty {
-            throw PiAIError.missingSecret(reference.account)
+            throw ModelKitError.missingSecret(reference.account)
         }
         return value
     }
@@ -96,7 +96,7 @@ private let sampleRequest = ModelRequest(
     do {
         _ = try await store.secret(for: NamedSecret(account: "NO_SUCH_PIAI_SECRET"))
         Issue.record("expected a missing secret")
-    } catch let error as PiAIError {
+    } catch let error as ModelKitError {
         #expect(error == .missingSecret("NO_SUCH_PIAI_SECRET"))
     }
 }
@@ -270,7 +270,7 @@ private let sampleRequest = ModelRequest(
     do {
         _ = try await provider.complete(sampleRequest)
         Issue.record("expected an HTTP error")
-    } catch let error as PiAIError {
+    } catch let error as ModelKitError {
         #expect(error == .http(status: 401, body: "nope"))
     }
 }

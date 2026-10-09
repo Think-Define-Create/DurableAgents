@@ -12,7 +12,7 @@
 		LU0000000000000000000032 /* DurableStore in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000022 /* DurableStore */; };
 		LU0000000000000000000033 /* DurableSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000023 /* DurableSecurity */; };
 		LU0000000000000000000034 /* DurableFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000024 /* DurableFoundationModels */; };
-		LU0000000000000000000035 /* PiAI in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000025 /* PiAI */; };
+		LU0000000000000000000035 /* ModelKit in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000025 /* ModelKit */; };
 		LU0000000000000000000036 /* DurableMCP in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000026 /* DurableMCP */; };
 		LU0000000000000000000037 /* AgentAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = LU0000000000000000000027 /* AgentAppCore */; };
 		LU0000000000000000000040 /* LumenWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = LU0000000000000000000006 /* LumenWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -71,7 +71,7 @@
 				LU0000000000000000000032 /* DurableStore in Frameworks */,
 				LU0000000000000000000033 /* DurableSecurity in Frameworks */,
 				LU0000000000000000000034 /* DurableFoundationModels in Frameworks */,
-				LU0000000000000000000035 /* PiAI in Frameworks */,
+				LU0000000000000000000035 /* ModelKit in Frameworks */,
 				LU0000000000000000000036 /* DurableMCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -141,7 +141,7 @@
 				LU0000000000000000000022 /* DurableStore */,
 				LU0000000000000000000023 /* DurableSecurity */,
 				LU0000000000000000000024 /* DurableFoundationModels */,
-				LU0000000000000000000025 /* PiAI */,
+				LU0000000000000000000025 /* ModelKit */,
 				LU0000000000000000000026 /* DurableMCP */,
 			);
 			productName = Lumen;
@@ -571,10 +571,10 @@
 			package = LU000000000000000000001A /* XCLocalSwiftPackageReference "../.." */;
 			productName = DurableFoundationModels;
 		};
-		LU0000000000000000000025 /* PiAI */ = {
+		LU0000000000000000000025 /* ModelKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = LU000000000000000000001A /* XCLocalSwiftPackageReference "../.." */;
-			productName = PiAI;
+			productName = ModelKit;
 		};
 		LU0000000000000000000026 /* DurableMCP */ = {
 			isa = XCSwiftPackageProductDependency;

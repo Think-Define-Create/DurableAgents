@@ -1,6 +1,6 @@
 import DurableCore
 import Foundation
-import PiAI
+import ModelKit
 
 /// Multi-step agent loop. Each model response is one journaled checkpoint.
 ///
@@ -10,7 +10,7 @@ import PiAI
 /// conversation instead of a tool body. When the prompt is longer than
 /// `compactAfterMessages`, the oldest messages are summarized, the summary is journaled,
 /// and those messages stay in the log but leave the next prompt.
-public struct PiAgentStep: ModelStep {
+public struct AgentLoopStep: ModelStep {
     public var provider: any ModelProvider
     public var modelName: String
     public var instructions: String
@@ -178,3 +178,6 @@ public struct PiAgentStep: ModelStep {
         return .string(json)
     }
 }
+
+@available(*, deprecated, renamed: "AgentLoopStep")
+public typealias PiAgentStep = AgentLoopStep

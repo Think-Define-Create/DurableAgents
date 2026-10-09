@@ -2,7 +2,7 @@ import DurableCore
 import DurableMCP
 import DurableSecurity
 import Foundation
-import PiAI
+import ModelKit
 
 public struct SendOutcome: Sendable, Equatable {
     public var conversationID: String

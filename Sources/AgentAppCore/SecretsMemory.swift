@@ -1,6 +1,6 @@
 import DurableMCP
 import Foundation
-import PiAI
+import ModelKit
 
 /// In-memory stand-in for the Keychain. The app writes the real Keychain.
 public actor MemorySecretStore: SecretStore {
@@ -12,7 +12,7 @@ public actor MemorySecretStore: SecretStore {
 
     public func secret(for reference: any SecretReference) async throws -> String {
         guard let value = values[reference.account] else {
-            throw PiAIError.missingSecret(reference.account)
+            throw ModelKitError.missingSecret(reference.account)
         }
         return value
     }

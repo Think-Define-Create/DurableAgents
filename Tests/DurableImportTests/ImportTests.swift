@@ -1,7 +1,7 @@
 @testable import DurableCore
 import DurableStore
 import Foundation
-import PiDurableImport
+import DurableImport
 import Testing
 
 #if canImport(Darwin)
@@ -21,7 +21,7 @@ import Musl
     try writeSQLite(source, sql: fixtureSQL)
 
     let store = try SQLiteEventStore(path: destination)
-    let report = try await PiDurableImporter.importDatabase(source: source, into: store)
+    let report = try await DurableImporter.importDatabase(source: source, into: store)
     #expect(report.conversations == 2)
     #expect(report.entries == 6)
     #expect(report.losses.contains { $0.code == "live-task" })
@@ -69,7 +69,7 @@ import Musl
         """)
     let store = InMemoryEventStore(storeID: "import")
     await #expect(throws: ImportError.self) {
-        try await PiDurableImporter.importDatabase(source: source, into: store)
+        try await DurableImporter.importDatabase(source: source, into: store)
     }
 }
 
@@ -131,11 +131,11 @@ private func importBinary() throws -> String {
         throw ImportError.schema("missing .build")
     }
     for case let url as URL in enumerator {
-        if url.lastPathComponent == "pi-durable-import", !url.hasDirectoryPath, !url.path.contains(".dSYM") {
+        if url.lastPathComponent == "durable-import", !url.hasDirectoryPath, !url.path.contains(".dSYM") {
             return url.path
         }
     }
-    throw ImportError.schema("pi-durable-import binary was not built")
+    throw ImportError.schema("durable-import binary was not built")
 }
 
 private let fixtureSQL = """

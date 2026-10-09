@@ -41,7 +41,7 @@ public struct AnthropicMessages: ModelProvider {
         return StreamLoop.open(transport: transport, request: {
             let key = try await secrets.secret(for: apiKey)
             guard !key.isEmpty else {
-                throw PiAIError.missingSecret(apiKey.account)
+                throw ModelKitError.missingSecret(apiKey.account)
             }
             let body = try AnthropicEncoding.body(for: request)
             return HTTPRequest(
@@ -203,7 +203,7 @@ private struct AnthropicAccumulator: SSEReducing {
             }
             return events
         case "error":
-            throw PiAIError.malformed(Self.errorMessage(json) ?? data)
+            throw ModelKitError.malformed(Self.errorMessage(json) ?? data)
         default:
             return []
         }

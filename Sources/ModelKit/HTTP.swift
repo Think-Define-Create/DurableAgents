@@ -40,7 +40,7 @@ public struct FixtureTransport: HTTPTransport {
         let status = status
         return AsyncThrowingStream { continuation in
             if status >= 400 {
-                continuation.finish(throwing: PiAIError.http(status: status, body: String(decoding: payload, as: UTF8.self)))
+                continuation.finish(throwing: ModelKitError.http(status: status, body: String(decoding: payload, as: UTF8.self)))
                 return
             }
             continuation.yield(payload)
@@ -165,7 +165,7 @@ private final class URLSessionByteDelegate: NSObject, URLSessionDataDelegate, @u
             }
         } else if status >= 400 {
             let body = String(decoding: errorBody, as: UTF8.self)
-            box.finish(throwing: PiAIError.http(status: status, body: body))
+            box.finish(throwing: ModelKitError.http(status: status, body: body))
         } else {
             box.finish()
         }
@@ -181,7 +181,7 @@ enum JSONBodies {
     static func parseObject(_ data: Data) throws -> [String: Any] {
         let object = try JSONSerialization.jsonObject(with: data)
         guard let fields = object as? [String: Any] else {
-            throw PiAIError.malformed("expected a JSON object")
+            throw ModelKitError.malformed("expected a JSON object")
         }
         return fields
     }
