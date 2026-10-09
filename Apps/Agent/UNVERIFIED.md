@@ -20,6 +20,7 @@
 | `AgentModel.swift` | `FoundationModelsProvider` | Compiled only when the Foundation Models framework is present and the OS is 26. Otherwise the offline demo is used. |
 | Signing | App Group `group.dev.thinkdefinecreate.Lumen` | Automatic signing must register the group. There is no `aps-environment` entitlement on purpose. |
 | `Sources/DurableSchedule/AppleWake.swift` | `BGAppRefreshTaskRequest`, `BGProcessingTaskRequest`, `BGTaskScheduler.submit`, `UNUserNotificationCenter.add` | Gated with `canImport(BackgroundTasks)` and `canImport(UserNotifications)`, so Linux does not compile it. iOS 27's `submitTaskRequest` is not called. |
+| Retrieval | `NLContextualEmbedding` | Not called. Linux and the package use `HashEmbedder`. Do not assume a Natural Language embedding API. |
 
 Not implemented, on purpose:
 

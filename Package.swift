@@ -31,6 +31,8 @@ let package = Package(
         .library(name: "DurableSchedule", targets: ["DurableSchedule"]),
         .library(name: "DurableIdentity", targets: ["DurableIdentity"]),
         .library(name: "DurableSkills", targets: ["DurableSkills"]),
+        .library(name: "DurableRetrieval", targets: ["DurableRetrieval"]),
+        .library(name: "DurableMemory", targets: ["DurableMemory"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -215,6 +217,7 @@ let package = Package(
             name: "DurableMCP",
             dependencies: [
                 "DurableCore",
+                "DurableMemory",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "SystemPackage", package: "swift-system"),
             ],
@@ -317,6 +320,38 @@ let package = Package(
         .testTarget(
             name: "DurableSkillsTests",
             dependencies: ["DurableSkills", "DurableCore", "DurableStore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableRetrieval",
+            dependencies: ["DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableRetrievalTests",
+            dependencies: ["DurableRetrieval"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableMemory",
+            dependencies: [
+                "DurableCore",
+                "DurableRetrieval",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableMemoryTests",
+            dependencies: ["DurableMemory", "DurableCore", "DurableStore", "DurableRetrieval"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

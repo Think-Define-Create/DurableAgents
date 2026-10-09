@@ -1,11 +1,15 @@
 import DurableCore
+import DurableMemory
 import Foundation
 import MCP
 
 /// Exposes one engine as an MCP server.
 ///
 /// Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`,
-/// `approve`, `reject`, `export_audit`.
+/// `approve`, `reject`, `export_audit`. When `memory` is set, the knowledge-graph tools
+/// `create_entities`, `create_relations`, `add_observations`, `delete_entities`,
+/// `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, and `open_nodes`
+/// are installed as well.
 ///
 /// `approve` and `reject` require `approverId` and `authLevel`. An empty approver allowlist
 /// refuses every approval. The engine still checks that the auth level meets the approval.
@@ -16,8 +20,8 @@ public actor DurableMCPServer {
     private let http: StatelessHTTPServerTransport
     private var started = false
 
-    public init(engine: Engine, store: any EventStore, approverIDs: Set<String>) {
-        operations = MCPServerOperations(engine: engine, store: store, approverIDs: approverIDs)
+    public init(engine: Engine, store: any EventStore, approverIDs: Set<String>, memory: MemoryIndex? = nil) {
+        operations = MCPServerOperations(engine: engine, store: store, approverIDs: approverIDs, memory: memory)
         server = Server(
             name: "DurableAgents",
             version: "1.0.0",
@@ -74,11 +78,13 @@ private final class MCPServerOperations: Sendable {
     private let engine: Engine
     private let store: any EventStore
     private let approverIDs: Set<String>
+    private let memory: MemoryIndex?
 
-    init(engine: Engine, store: any EventStore, approverIDs: Set<String>) {
+    init(engine: Engine, store: any EventStore, approverIDs: Set<String>, memory: MemoryIndex?) {
         self.engine = engine
         self.store = store
         self.approverIDs = approverIDs
+        self.memory = memory
     }
 
     func definitions() -> [MCP.Tool] {
@@ -137,7 +143,14 @@ private final class MCPServerOperations: Sendable {
                 required: [],
                 properties: []
             ),
-        ]
+        ] + memoryTools()
+    }
+
+    private func memoryTools() -> [MCP.Tool] {
+        guard memory != nil else { return [] }
+        return MemoryMCP.names.map { name in
+            tool(name, "Memory graph tool \(name).", required: [], properties: [])
+        }
     }
 
     func call(_ params: CallTool.Parameters) async -> CallTool.Result {
@@ -179,6 +192,11 @@ private final class MCPServerOperations: Sendable {
                 let events = try await store.readAll()
                 return ok(["jsonl": .string(AuditExport.jsonl(events))])
             default:
+                if MemoryMCP.names.contains(params.name), let memory {
+                    let arguments = MCPJSON.json(.object(params.arguments ?? [:]))
+                    let result = try await MemoryMCP.handle(params.name, arguments: arguments, index: memory, engine: engine, store: store)
+                    return ok(["result": result])
+                }
                 return fail("unknown tool")
             }
         } catch let error as MCPCallError {

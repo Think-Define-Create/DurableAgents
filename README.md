@@ -30,6 +30,8 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. No Apple imports on the Linux path. |
 | `DurableIdentity` | Versioned soul, identity, user, rules, and memory digest. Agent edits stay proposals until a person approves them. |
 | `DurableSkills` | `SKILL.md` registry. Scripts are listed as text and are never executed. Agent edits stay proposals. |
+| `DurableRetrieval` | Hash embeddings, cosine, and reciprocal-rank fusion. No Apple Natural Language import. |
+| `DurableMemory` | Derived GRDB index of facts and a knowledge graph. The event log stays the source of truth. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -127,6 +129,14 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 
 `DurableSkills` parses `SKILL.md` leniently and records warnings instead of failing the file. A skill name is at most 64 characters of `[a-z0-9-]`. `install` is a person adding a skill. `propose` is the agent, capped at five proposals an hour for that name, and it does not replace the installed text. `decide` is the only promotion. An empty proposal file map keeps the previous files, so a text edit does not wipe `scripts/` or `references/`. `allowed-tools` narrows the tools the skill may name; it never grants a tool that is not already registered. Files under `scripts/` are stored and returned with `executable: false`. There is no subprocess and no JavaScript sandbox. `skill.activate` and `skill.read_resource` are pure tools that read the journal. They do not call the engine.
 
+## Memory
+
+`DurableRetrieval` embeds text with `HashEmbedder` (`hash-v1`, a stable token hash, L2-normalized). `RetrievalMath.fuse` is reciprocal rank fusion with `k = 60`. `BruteForceVectors` is the index. Apple's `NLContextualEmbedding` is not called.
+
+`DurableMemory` rebuilds a GRDB file from `state.wrote` events. The sqlite file is a derived index, not a second ciphertext. Emails become `[redacted-email]` and `sk-…` tokens become `[redacted-secret]` before they are stored. Search mixes FTS5 with cosine and fuses the two lists. `memory.remember` and `memory.forget` are transactional: they return `StateWrite`s and do not write SQLite themselves. `memory.search` and `memory.open` are pure and rebuild from the log first. `shred` and `decay` journal tombstones, then rebuild.
+
+When `DurableMCPServer` is created with a `MemoryIndex`, it also exposes `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, and `open_nodes`. Those handlers append to the log and rebuild. Do not call them from a tool on the same engine.
+
 ## Routines
 
 `DurableSchedule` journals `routine.defined`, `routine.fired`, and `routine.skipped`. A firing uses `requestID = routine:<id>:<slot>` so a second tick does not start a second run. `heartbeat.respond` (OpenClaw's `heartbeat_respond`) returns `noReply`, `notify`, or `updateChecklist`. `noReply` does not schedule a notification. Quiet hours, an empty checklist, a busy engine, a budget failure, and a too-soon event are skipped and written to the log. `runLatest` runs the newest missed slot. `skipMissed` drops a gap. `runAll` runs at most eight. The Apple wake helper is `AppleRoutineWake`, compiled only where BackgroundTasks and UserNotifications exist. It schedules a best-effort refresh. It does not promise a 30-minute cadence, and it does not call the iOS 27 `submitTaskRequest` API.
@@ -170,7 +180,7 @@ Auth is secret-account names: `envSecrets` for stdio environment variables, `hea
 
 stdio uses `Foundation.Process` on macOS and Linux. It is not available on iOS (`MCPPlatform.stdioAvailable`). Streamable HTTP is a JSON POST through `HTTPClientTransport` with SSE turned off, so the same client runs on Linux and on iOS. The SDK's SSE client is compiled only off Linux and was not exercised here (`MCPPlatform.sseStreamingCompiled` is false on Linux). Calls check cancellation, honor `timeoutSeconds`, and open one new connection after an MCP `connectionClosed` error. Other MCP errors are not retried. SDK failures are rethrown as `MCPCallError` with a fixed sentence so a URL or token in `localizedDescription` cannot reach the journal.
 
-`DurableMCPServer` exposes the engine to other clients (Claude, Cursor, a LangGraph back office). Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`, `approve`, `reject`, `export_audit`. `approve` and `reject` require `approverId` and `authLevel` (`anonymous`, `session`, `devicePasscode`, `biometric`). The server allowlist is a set of approver ids; an empty set refuses every approval. The engine still rejects an auth level below the approval's requirement. `export_audit` is `AuditExport.jsonl`, which omits message text and tool arguments. stdio and stateless streamable HTTP (POST JSON, GET 405) are both wired. Do not call this server from a tool on the same engine. The tool runs while the engine holds its lock.
+`DurableMCPServer` exposes the engine to other clients (Claude, Cursor, a LangGraph back office). Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`, `approve`, `reject`, `export_audit`. Pass a `MemoryIndex` to also expose the knowledge-graph tools (`create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, `open_nodes`). `approve` and `reject` require `approverId` and `authLevel` (`anonymous`, `session`, `devicePasscode`, `biometric`). The server allowlist is a set of approver ids; an empty set refuses every approval. The engine still rejects an auth level below the approval's requirement. `export_audit` is `AuditExport.jsonl`, which omits message text and tool arguments. stdio and stateless streamable HTTP (POST JSON, GET 405) are both wired. Do not call this server from a tool on the same engine. The tool runs while the engine holds its lock.
 
 ### MCP security
 
