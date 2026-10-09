@@ -110,6 +110,15 @@ public actor Engine {
 
     public func storeID() -> String { storeIdentifier }
 
+    /// Appends events on an arbitrary stream. Schedule and identity modules use this so they
+    /// share the engine's fence instead of writing beside it.
+    public func record(_ drafts: [EventDraft], stream: StreamID) async throws {
+        try await exclusively {
+            try ensureWritable()
+            _ = try await commit(stream, drafts)
+        }
+    }
+
     /// Journals a timer request and notifies `TimerScheduling`. Does not suspend the run.
     public func requestTimer(name: String, fireAt: Date) async throws {
         try await exclusively {

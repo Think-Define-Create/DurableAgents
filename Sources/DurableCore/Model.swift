@@ -32,6 +32,9 @@ public enum EventType {
     public static let importNote = "import.note"
     /// The delivery effect exhausted its attempts, or the receiver refused it.
     public static let deliveryDeadLettered = "delivery.deadLettered"
+    public static let routineDefined = "routine.defined"
+    public static let routineFired = "routine.fired"
+    public static let routineSkipped = "routine.skipped"
 
     public static let messageAppendedCurrentVersion = 2
 }
@@ -645,7 +648,7 @@ public struct RunBudget: Sendable, Equatable, Codable {
         return "steps:\(whole(maxSteps));tools:\(whole(maxToolCalls));tokens:\(whole(maxTokens));wall:\(wall);on:\(onExceeded.rawValue)"
     }
 
-    func json() -> JSONValue {
+    public func json() -> JSONValue {
         var fields: [String: JSONValue] = [
             "onExceeded": .string(onExceeded.rawValue),
         ]
@@ -664,7 +667,7 @@ public struct RunBudget: Sendable, Equatable, Codable {
         return .object(fields)
     }
 
-    static func parse(_ value: JSONValue) throws -> RunBudget {
+    public static func parse(_ value: JSONValue) throws -> RunBudget {
         guard let fields = value.objectValue,
               let raw = fields["onExceeded"]?.stringValue,
               let disposition = BudgetDisposition(rawValue: raw)

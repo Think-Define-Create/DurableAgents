@@ -27,6 +27,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
 | `DurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
 | `durable-import` | CLI for that importer. |
+| `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. No Apple imports on the Linux path. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -115,6 +116,10 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 ## Inbox
 
 `submit` is exactly-once for a `requestID` inside one conversation. The payload hash is SHA-256 of the text and the script. The same id and the same hash returns the original submission. The same id and a different hash throws `DurableError.requestIDConflict`. A second id while a run is suspended is queued and starts after that run finishes.
+
+## Routines
+
+`DurableSchedule` journals `routine.defined`, `routine.fired`, and `routine.skipped`. A firing uses `requestID = routine:<id>:<slot>` so a second tick does not start a second run. `heartbeat.respond` (OpenClaw's `heartbeat_respond`) returns `noReply`, `notify`, or `updateChecklist`. `noReply` does not schedule a notification. Quiet hours, an empty checklist, a busy engine, a budget failure, and a too-soon event are skipped and written to the log. `runLatest` runs the newest missed slot. `skipMissed` drops a gap. `runAll` runs at most eight. The Apple wake helper is `AppleRoutineWake`, compiled only where BackgroundTasks and UserNotifications exist. It schedules a best-effort refresh. It does not promise a 30-minute cadence, and it does not call the iOS 27 `submitTaskRequest` API.
 
 ## Timers and retry
 

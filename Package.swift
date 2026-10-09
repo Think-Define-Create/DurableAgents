@@ -28,6 +28,7 @@ let package = Package(
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
         .library(name: "DurableImport", targets: ["DurableImport"]),
         .executable(name: "durable-import", targets: ["DurableImportCLI"]),
+        .library(name: "DurableSchedule", targets: ["DurableSchedule"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -272,6 +273,20 @@ let package = Package(
         .testTarget(
             name: "DurableAuditTests",
             dependencies: ["DurableAudit", "DurableCore", "DurableStore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableSchedule",
+            dependencies: ["DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableScheduleTests",
+            dependencies: ["DurableSchedule", "DurableCore", "DurableStore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
