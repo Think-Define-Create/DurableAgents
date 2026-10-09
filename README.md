@@ -29,6 +29,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `durable-import` | CLI for that importer. |
 | `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. No Apple imports on the Linux path. |
 | `DurableIdentity` | Versioned soul, identity, user, rules, and memory digest. Agent edits stay proposals until a person approves them. |
+| `DurableSkills` | `SKILL.md` registry. Scripts are listed as text and are never executed. Agent edits stay proposals. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -117,6 +118,14 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 ## Inbox
 
 `submit` is exactly-once for a `requestID` inside one conversation. The payload hash is SHA-256 of the text and the script. The same id and the same hash returns the original submission. The same id and a different hash throws `DurableError.requestIDConflict`. A second id while a run is suspended is queued and starts after that run finishes.
+
+## Identity
+
+`DurableIdentity` stores `SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, and `MEMORY.md` as journaled documents. `replace` is a person editing. `propose` is the agent, capped at five proposals an hour for each layer, and it does not change the prompt. `decide` is the only way a proposal becomes the current text. `revert` copies an older version forward. `assemble` packs the layers into a system prompt, skips bootstrap in light context, and marks a clipped layer with `[truncated]`. Put `AssembledPrompt.system` in `AgentLoopStep.instructions`. The `audit` value lists the layer versions that were used. Encryption is the event-store wrapper, not a second cipher in this module.
+
+## Skills
+
+`DurableSkills` parses `SKILL.md` leniently and records warnings instead of failing the file. A skill name is at most 64 characters of `[a-z0-9-]`. `install` is a person adding a skill. `propose` is the agent, capped at five proposals an hour for that name, and it does not replace the installed text. `decide` is the only promotion. An empty proposal file map keeps the previous files, so a text edit does not wipe `scripts/` or `references/`. `allowed-tools` narrows the tools the skill may name; it never grants a tool that is not already registered. Files under `scripts/` are stored and returned with `executable: false`. There is no subprocess and no JavaScript sandbox. `skill.activate` and `skill.read_resource` are pure tools that read the journal. They do not call the engine.
 
 ## Routines
 

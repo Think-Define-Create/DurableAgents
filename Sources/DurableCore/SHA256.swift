@@ -1,3 +1,8 @@
+/// SHA-256 of a UTF-8 string. Skills and other modules use this for content identity.
+public enum ContentSHA256 {
+    public static func hex(_ text: String) -> String { SHA256Hash.hex(text) }
+}
+
 /// SHA-256 used for submission payload hashes. Implemented here so the core
 /// target has no crypto dependency and behaves the same on Apple platforms and Linux.
 enum SHA256Hash {

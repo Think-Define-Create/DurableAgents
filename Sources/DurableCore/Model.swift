@@ -39,6 +39,11 @@ public enum EventType {
     public static let identityProposed = "identity.document.proposed"
     public static let identityResolved = "identity.document.resolved"
     public static let identityAssembled = "identity.assembled"
+    public static let skillDefined = "skill.defined"
+    public static let skillProposed = "skill.proposed"
+    public static let skillResolved = "skill.resolved"
+    public static let skillActivated = "skill.activated"
+    public static let skillResource = "skill.resource"
 
     public static let messageAppendedCurrentVersion = 2
 }
