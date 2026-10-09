@@ -16,6 +16,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableStore` | `EventStore`: in-memory, and SQLite through [GRDB](https://github.com/groue/GRDB.swift). |
 | `DurableKit` | `@MainActor` conversation model for SwiftUI: messages, run status, pending approval, event log. Observation is used when the SDK has it. |
 | `DurableFoundationModels` | `FoundationModelsStep` when the Apple framework is present. On Linux this target is a stub. |
+| `PiAI` | Provider streaming for Anthropic Messages, OpenAI Responses, and OpenAI-compatible chat. Keys stay in a secret store. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
@@ -74,7 +75,7 @@ The engine writes an `effect.intent` before the tool body runs, and writes the r
 | `transactional` | The body’s `StateWrite`s commit in the **same** database transaction as the result. A crash leaves the intent and no write. Recovery runs the body again and commits the write once. |
 | `external` | Call `reconcile`. `.done` journals that result and does not run the body again. `.notDone` reruns with the same key. `.unknown` suspends for a human. |
 
-`SimulatedProcessCrash` leaves the intent in place and does not mark the run failed. A normal tool error records the result and fails the run. Retry is not scheduled in this milestone.
+`SimulatedProcessCrash` leaves the intent in place and does not mark the run failed. A normal tool error records the result and fails the run unless `RetryPolicy` schedules another attempt. See [Timers and retry](#timers-and-retry).
 
 ## Approval
 
@@ -118,6 +119,18 @@ Each plan uses a new session. The prompt is rebuilt from the durable transcript,
 ### On-device limits
 
 Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. Escrow Assistant keeps the instructions short, sends three tools, and only the last 12 transcript lines (each truncated) into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device. This sample does not call Private Cloud Compute.
+
+## Model providers (`PiAI`)
+
+`PiAI` does not import the durable kernel. A `ModelProvider` yields `ModelStreamEvent` values (`textDelta`, `thinkingDelta`, `toolCallDelta`, `toolCall`, `usage`, `stop`). Token deltas stay in memory. `complete` folds them into one `ProviderTurn`, which is the checkpoint a durable loop should journal.
+
+| Type | Endpoint |
+|---|---|
+| `AnthropicMessages` | `POST /v1/messages` with `x-api-key` and `anthropic-version: 2023-06-01` |
+| `OpenAIResponses` | `POST /v1/responses` with `Authorization: Bearer` |
+| `OpenAICompatibleChat` | `POST {base}/v1/chat/completions` for OpenAI, xAI, Groq, OpenRouter, and Ollama |
+
+API keys are `SecretReference` values (an account name), resolved by `SecretStore`. `EnvironmentSecretStore` reads the process environment. `KeychainSecretStore` is compiled only where Security is available. The key is sent as a header and is not written into the JSON body. An empty secret on the chat provider omits `Authorization` for local servers. `ScriptedProvider` replays a fixed event list for tests.
 
 ## DurableKit
 
