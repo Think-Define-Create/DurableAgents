@@ -96,6 +96,7 @@ struct AgentList: View {
                 }
                 .badge(model.inbox.count)
                 .accessibilityLabel(String(localized: "Approvals"))
+                .accessibilityIdentifier("inbox.open")
             }
         }
     }
@@ -134,6 +135,7 @@ struct ChatView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(12)
                                     .accessibilityLabel(String(localized: "Live reply"))
+                                    .accessibilityIdentifier("chat.live")
                             }
                         }
                         .padding()

@@ -37,6 +37,7 @@ final class AgentModel {
     var mcpPort: Int?
     var banner: String?
     var isSending = false
+    private var widget = WidgetSnapshot(pendingApprovals: 0, runningAgents: 0, prompts: [])
 
     private var session: AgentSession?
     private var transcript: LiveTranscript?
@@ -76,7 +77,7 @@ final class AgentModel {
                 apple: { _ in
                     #if canImport(FoundationModels)
                     if #available(iOS 26, macOS 26, *) {
-                        return FoundationModelsProvider(instructions: "You are Lumen, a personal agent. Prefer on-device tools.")
+                        return FoundationModelsProvider(instructions: Self.onDeviceInstructions)
                     }
                     #endif
                     return nil
@@ -124,6 +125,7 @@ final class AgentModel {
         if let agent = try? await session.create(title: title, provider: provider) {
             selectedID = agent.id
             await reload()
+            prewarmOnDeviceModel()
         }
     }
 
@@ -159,10 +161,11 @@ final class AgentModel {
                 try? await Task.sleep(for: .milliseconds(80))
             }
         }
+        var sent = false
         do {
             _ = try await session.send(selectedID, text: text)
             AppleBackground.submitContinued(title: agents.first { $0.id == selectedID }?.title ?? "Lumen")
-            await notifyInbox()
+            sent = true
         } catch {
             banner = String(describing: error)
         }
@@ -170,6 +173,9 @@ final class AgentModel {
         isSending = false
         liveText = ""
         await reload()
+        if sent {
+            await notifyInbox()
+        }
         await refreshActivity()
         await writeWidget()
     }
@@ -198,24 +204,39 @@ final class AgentModel {
         agents = await session.agents()
         settings = await session.settings()
         mcpPort = await session.mcpPort
-        inbox = (try? await session.inbox()) ?? []
-        if let selectedID {
-            messages = (try? await session.transcript(for: selectedID)) ?? []
-            events = (try? await session.events(for: selectedID)) ?? []
-            if let usage = try? await session.usage(for: selectedID) {
-                usageNote = usage.note
-                usageDollars = usage.estimatedUSD
-            }
-        } else {
+        guard let overview = try? await session.overview(for: selectedID) else {
+            inbox = []
             messages = []
             events = []
+            return
+        }
+        inbox = overview.inbox
+        messages = overview.messages
+        events = overview.events
+        widget = overview.widget
+        if let usage = overview.usage {
+            usageNote = usage.note
+            usageDollars = usage.estimatedUSD
         }
     }
 
     func select(_ id: String) async {
         selectedID = id
+        prewarmOnDeviceModel()
         await reload()
     }
+
+    /// Loads the on-device model while the person is still typing, so the first reply starts sooner.
+    private func prewarmOnDeviceModel() {
+        guard agents.first(where: { $0.id == selectedID })?.provider.kind == .apple else { return }
+        #if canImport(FoundationModels)
+        if #available(iOS 26, macOS 26, *), FoundationModelsStep.isAvailable() {
+            FoundationModelsProvider(instructions: Self.onDeviceInstructions).prewarm()
+        }
+        #endif
+    }
+
+    nonisolated private static let onDeviceInstructions = "You are Lumen, a personal agent. Prefer on-device tools."
 
     func saveSettings() async {
         try? await session?.updateSettings(settings)
@@ -290,9 +311,9 @@ final class AgentModel {
         #endif
     }
 
+    /// Writes the snapshot from the last `reload()` instead of reading the log again.
     private func writeWidget() async {
-        let url = widgetURL()
-        try? await session?.writeWidgetSnapshot(to: url)
+        try? widget.write(to: widgetURL())
     }
 
     private func refreshActivity() async {
