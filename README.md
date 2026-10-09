@@ -20,6 +20,8 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `PiAgent` | Multi-step loop on the engine: one journaled model checkpoint, parallel safe tools, subagents, forks, compaction. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
+| `AgentAppCore` | Lumen's session, tools, inbox, and usage. No SwiftUI. Tested on Linux. |
+| `Apps/Agent` | Lumen, the multiplatform agent app. Open the Xcode project and run it. |
 | `DurableDelivery` | Journaled webhook, Slack, and APNs delivery with backoff and dead letters. |
 | `DurableMCP` | MCP client and server on the official Swift SDK (spec 2025-11-25). |
 | `mcp-fixture` | Tiny stdio MCP server the Linux tests spawn. |
@@ -251,9 +253,15 @@ The journal file is encrypted at rest with `EncryptingEventStore` and `BuiltInRe
 
 If you run the UI tests (`EscrowAssistantUITests`), pass `-ResetJournal` on the first launch so a previous simulator install does not leave extra receipts. The crash test does that, then relaunches without resetting so recovery can see the journal. Those tests were not executed in this environment.
 
+## Lumen
+
+Open `Apps/Agent/Lumen.xcodeproj` in Xcode 26 and press Run. The product name is Lumen. Architecture, the screen-to-package map, entitlements, and the first-run checklist are in `Apps/Agent/README.md` and `Apps/Agent/TESTING.md`. Apple-only calls that were not compiled here are listed in `Apps/Agent/UNVERIFIED.md`.
+
+`AgentAppCore` is the part that `swift test` covers: one engine for many agents, builtin tools, the approval inbox, illustrative usage, crypto-shred, and a loopback MCP listener on macOS and Linux.
+
 ## Build and test on a Mac
 
-Install a Swift 6.1+ toolchain. Xcode 26 is required to compile Escrow Assistant and Foundation Models. The package tests do not need that SDK:
+Install a Swift 6.1+ toolchain. Xcode 26 is required to compile Escrow Assistant, Lumen, and Foundation Models. The package tests do not need that SDK:
 
 ```bash
 swift test

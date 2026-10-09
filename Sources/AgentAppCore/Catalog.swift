@@ -26,7 +26,7 @@ public enum AgentError: Error, Sendable, Equatable, CustomStringConvertible {
     }
 }
 
-public enum ProviderKind: String, Codable, Sendable, Equatable, CaseIterable {
+public enum ProviderKind: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
     case scripted
     case apple
     case anthropic

@@ -201,6 +201,8 @@ public actor AgentSession {
         return try await engine.transcript(ConversationID(raw: raw))
     }
 
+    public func liveTranscript() -> LiveTranscript { transcript }
+
     public func liveText(for id: String) async -> String {
         guard let raw = directory.agent(id)?.conversationID else { return "" }
         return await transcript.snapshot(conversationID: raw)

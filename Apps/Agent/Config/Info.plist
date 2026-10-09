@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>dev.thinkdefinecreate.Lumen.refresh</string>
+		<string>dev.thinkdefinecreate.Lumen.continue</string>
+	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Lumen reads and writes calendar events you ask an agent to handle. Writes are tagged so a restart does not create a second copy.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Lumen creates reminders you ask for. Each reminder stores an effect key so a retry updates the same item.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Lumen searches your contacts when you ask an agent to find a person.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Lumen turns your voice into a message for the agent. Audio is recognized on device when Apple allows it.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Lumen uses the microphone while you dictate a message.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Lumen scans a page so the agent can read it.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Lumen uses Face ID to unlock the app and to approve high-risk actions.</string>
+</dict>
+</plist>

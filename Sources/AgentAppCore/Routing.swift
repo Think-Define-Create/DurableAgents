@@ -5,15 +5,21 @@ import PiAI
 
 public actor LiveTranscript {
     private var text: [String: String] = [:]
+    private var latestID: String = ""
 
     public init() {}
 
     public func append(conversationID: String, delta: String) {
+        latestID = conversationID
         text[conversationID, default: ""] += delta
     }
 
     public func snapshot(conversationID: String) -> String {
         text[conversationID] ?? ""
+    }
+
+    public func latest() -> String {
+        text[latestID] ?? ""
     }
 
     public func clear(conversationID: String) {
