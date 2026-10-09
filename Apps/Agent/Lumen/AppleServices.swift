@@ -7,11 +7,11 @@ import Speech
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
-#if canImport(ActivityKit)
+#if canImport(ActivityKit) && !os(macOS)
 import ActivityKit
 import AgentAppCore
 #endif
-#if canImport(BackgroundTasks)
+#if canImport(BackgroundTasks) && !os(macOS)
 import BackgroundTasks
 #endif
 #if canImport(UserNotifications)
@@ -97,7 +97,7 @@ final class SpeechCapture {
 }
 #endif
 
-#if canImport(ActivityKit)
+#if canImport(ActivityKit) && !os(macOS)
 enum LumenActivityCenter {
     static func sync(inbox: [InboxItem], agents: [AgentProfile]) async {
         if #available(iOS 16.2, macOS 26.0, *) {
@@ -124,7 +124,7 @@ enum AppleBackground {
     static let continueID = "dev.thinkdefinecreate.Lumen.continue"
 
     static func register() {
-        #if canImport(BackgroundTasks)
+        #if canImport(BackgroundTasks) && !os(macOS)
         BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshID, using: nil) { task in
             handleRefresh(task)
         }
@@ -137,7 +137,7 @@ enum AppleBackground {
     }
 
     static func submitContinued(title: String) {
-        #if canImport(BackgroundTasks)
+        #if canImport(BackgroundTasks) && !os(macOS)
         let refresh = BGAppRefreshTaskRequest(identifier: refreshID)
         refresh.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(refresh)
@@ -149,9 +149,10 @@ enum AppleBackground {
         #endif
     }
 
-    #if canImport(BackgroundTasks)
+    #if canImport(BackgroundTasks) && !os(macOS)
     private static func handleRefresh(_ task: BGTask) {
-        let refresh = task as? BGAppRefreshTask
+        // BGTask is not marked Sendable, but completing it from another thread is supported.
+        nonisolated(unsafe) let refresh = task as? BGAppRefreshTask
         Task { @MainActor in
             await LumenRuntime.model?.reload()
             refresh?.setTaskCompleted(success: true)
@@ -162,10 +163,11 @@ enum AppleBackground {
     }
 
     private static func handleContinued(_ task: BGTask) {
-        guard #available(iOS 26, *), let continued = task as? BGContinuedProcessingTask else {
+        guard #available(iOS 26, *), let task = task as? BGContinuedProcessingTask else {
             task.setTaskCompleted(success: false)
             return
         }
+        nonisolated(unsafe) let continued = task
         continued.expirationHandler = {
             continued.setTaskCompleted(success: false)
         }

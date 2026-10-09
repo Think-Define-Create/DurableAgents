@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class LumenUITests: XCTestCase {
     func testOnboardingReachesTheAgentList() {
         let app = XCUIApplication()

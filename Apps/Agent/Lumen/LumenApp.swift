@@ -22,19 +22,19 @@ final class NotificationBridge: NSObject, UNUserNotificationCenterDelegate, @unc
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
+        didReceive response: UNNotificationResponse
+    ) async {
         let token = response.notification.request.content.userInfo["token"] as? String ?? ""
         let risk = response.notification.request.content.userInfo["risk"] as? String
         let action = response.actionIdentifier
         guard action == "approve" || action == "deny" else {
-            completionHandler()
             return
         }
-        Task { @MainActor in
-            await LumenRuntime.model?.decide(token: token, approved: action == "approve", highRisk: risk == "high")
-            completionHandler()
-        }
+        await Self.decide(token: token, approved: action == "approve", highRisk: risk == "high")
+    }
+
+    @MainActor
+    private static func decide(token: String, approved: Bool, highRisk: Bool) async {
+        await LumenRuntime.model?.decide(token: token, approved: approved, highRisk: highRisk)
     }
 }

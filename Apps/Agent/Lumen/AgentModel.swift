@@ -296,7 +296,7 @@ final class AgentModel {
     }
 
     private func refreshActivity() async {
-        #if canImport(ActivityKit)
+        #if canImport(ActivityKit) && !os(macOS)
         await LumenActivityCenter.sync(inbox: inbox, agents: agents)
         #endif
     }
