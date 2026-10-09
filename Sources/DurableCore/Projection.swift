@@ -57,6 +57,12 @@ struct ToolRecord: Equatable {
     var output: JSONValue
 }
 
+struct SubagentRecord: Equatable {
+    var conversationID: String
+    var finished: Bool
+    var finalText: String?
+}
+
 struct FoldedRun {
     var id: RunID
     var requestID: String
@@ -65,7 +71,24 @@ struct FoldedRun {
     var driver: RunDriver = .script
     var status: RunStatus
     var completedSteps: Int
-    var inflight: InflightEffect?
+    /// More than one entry only while a provider turn is running safe calls together.
+    var inflightBatch: [InflightEffect] = []
+    var inflight: InflightEffect? {
+        get { inflightBatch.first }
+        set {
+            if let newValue {
+                if let index = inflightBatch.firstIndex(where: { $0.callID == newValue.callID }) {
+                    inflightBatch[index] = newValue
+                } else if inflightBatch.isEmpty {
+                    inflightBatch = [newValue]
+                } else {
+                    inflightBatch[0] = newValue
+                }
+            } else {
+                inflightBatch.removeAll()
+            }
+        }
+    }
     var pending: PendingApproval?
     var plannedStep: ScriptedStep?
     var plannedIndex: Int?
@@ -74,6 +97,7 @@ struct FoldedRun {
     var wait: PendingWait?
     var finalText: String?
     var failure: String?
+    var subagents: [String: SubagentRecord] = [:]
 }
 
 struct FoldedConversation {
@@ -83,6 +107,9 @@ struct FoldedConversation {
     var runOrder: [String] = []
     var messages: [TranscriptMessage] = []
     var toolRecords: [ToolRecord] = []
+    /// Messages before this index stay in the log and are left out of the model prompt.
+    var promptStartIndex: Int = 0
+    var compactionSummary: String?
 
     var activeRun: FoldedRun? {
         for runID in runOrder.reversed() {
@@ -156,9 +183,9 @@ struct Projection {
             let when = Date(timeIntervalSince1970: try JSONNumbers.double(fireAt))
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 run.retryHold = RetryHold(attempt: Int(attempt), notBefore: when, timerName: timerName)
-                if var inflight = run.inflight {
-                    inflight.attempt = Int(attempt)
-                    run.inflight = inflight
+                let callRaw = event.payload["callID"]?.stringValue
+                if let index = run.inflightBatch.firstIndex(where: { callRaw == nil || $0.callID.raw == callRaw }) {
+                    run.inflightBatch[index].attempt = Int(attempt)
                 }
             }
         case EventType.waitStarted:
@@ -247,10 +274,13 @@ struct Projection {
         case EventType.effectIntent:
             let inflight = try inflight(from: event)
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
-                if run.inflight != nil {
+                if let existing = run.inflightBatch.first, existing.stepIndex != inflight.stepIndex {
                     throw DurableError.invariant("run \(run.id.raw) already has an in-flight effect")
                 }
-                run.inflight = inflight
+                if run.inflightBatch.contains(where: { $0.callID == inflight.callID }) {
+                    throw DurableError.invariant("run \(run.id.raw) already journaled call \(inflight.callID.raw)")
+                }
+                run.inflightBatch.append(inflight)
             }
         case EventType.effectResult:
             guard let callID = event.payload["callID"]?.stringValue else {
@@ -260,7 +290,8 @@ struct Projection {
             guard let runID = event.payload["runID"]?.stringValue, var run = conversation.runs[runID] else {
                 throw DurableError.invariant("effect.result references unknown run at seq \(event.globalSeq)")
             }
-            if let inflight = run.inflight, inflight.callID.raw == callID {
+            if let index = run.inflightBatch.firstIndex(where: { $0.callID.raw == callID }) {
+                let inflight = run.inflightBatch[index]
                 if event.payload["ok"]?.boolValue == true {
                     conversation.toolRecords.append(ToolRecord(
                         runID: runID,
@@ -270,7 +301,7 @@ struct Projection {
                         output: event.payload["output"] ?? .null
                     ))
                 }
-                run.inflight = nil
+                run.inflightBatch.remove(at: index)
             }
             conversation.runs[runID] = run
             conversations[event.stream.raw] = conversation
@@ -334,6 +365,40 @@ struct Projection {
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 run.status = .completed
                 run.finalText = text
+            }
+        case EventType.contextCompacted:
+            var conversation = conversation(event.stream)
+            if let summary = event.payload["summary"]?.stringValue {
+                conversation.compactionSummary = summary
+            }
+            if let through = event.payload["throughMessageID"]?.stringValue,
+               let index = conversation.messages.firstIndex(where: { $0.messageID == through })
+            {
+                conversation.promptStartIndex = index + 1
+            }
+            conversations[event.stream.raw] = conversation
+        case EventType.subagentStarted:
+            guard let callID = event.payload["callID"]?.stringValue,
+                  let child = event.payload["childConversationID"]?.stringValue
+            else {
+                throw DurableError.invariant("subagent.started is missing fields at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.subagents[callID] = SubagentRecord(conversationID: child, finished: false, finalText: nil)
+            }
+        case EventType.subagentFinished:
+            guard let callID = event.payload["callID"]?.stringValue else {
+                throw DurableError.invariant("subagent.finished is missing callID at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                var record = run.subagents[callID] ?? SubagentRecord(
+                    conversationID: event.payload["childConversationID"]?.stringValue ?? "",
+                    finished: true,
+                    finalText: nil
+                )
+                record.finished = true
+                record.finalText = event.payload["finalText"]?.stringValue
+                run.subagents[callID] = record
             }
         case EventType.runFailed:
             let reason = event.payload["reason"]?.stringValue ?? "failed"

@@ -21,6 +21,9 @@ public enum EventType {
     public static let waitResolved = "wait.resolved"
     public static let signalDelivered = "signal.delivered"
     public static let signalConsumed = "signal.consumed"
+    public static let contextCompacted = "context.compacted"
+    public static let subagentStarted = "subagent.started"
+    public static let subagentFinished = "subagent.finished"
 
     public static let messageAppendedCurrentVersion = 2
 }
@@ -273,6 +276,10 @@ public enum ScriptedStep: Sendable, Equatable {
     case sleepUntil(Date)
     /// Suspend until `Engine.signal(_:payload:)` delivers `name`.
     case waitSignal(name: String)
+    /// One model checkpoint: assistant text plus every tool call from that turn.
+    case providerTurn(ProviderTurnStep)
+    /// Summarize history. The original messages stay in the log and drop out of the prompt.
+    case compact(summary: String, throughMessageID: String)
 
     var canonical: String {
         switch self {
@@ -288,6 +295,10 @@ public enum ScriptedStep: Sendable, Equatable {
             return "sleep:\(date.timeIntervalSince1970)"
         case .waitSignal(let name):
             return "signal:\(name)"
+        case .providerTurn(let turn):
+            return "turn:\(turn.text):\(turn.calls.map(\.callID).joined(separator: ","))"
+        case .compact(let summary, let throughMessageID):
+            return "compact:\(throughMessageID):\(summary)"
         }
     }
 
@@ -317,6 +328,14 @@ public enum ScriptedStep: Sendable, Equatable {
             ])
         case .waitSignal(let name):
             return .object(["type": .string("waitSignal"), "name": .string(name)])
+        case .providerTurn(let turn):
+            return turn.json()
+        case .compact(let summary, let throughMessageID):
+            return .object([
+                "type": .string("compact"),
+                "summary": .string(summary),
+                "throughMessageID": .string(throughMessageID),
+            ])
         }
     }
 
@@ -357,9 +376,119 @@ public enum ScriptedStep: Sendable, Equatable {
                 throw DurableError.invariant("wait step is missing name")
             }
             return .waitSignal(name: name)
+        case "providerTurn":
+            return .providerTurn(try ProviderTurnStep.parse(value))
+        case "compact":
+            guard let summary = fields["summary"]?.stringValue,
+                  let throughMessageID = fields["throughMessageID"]?.stringValue
+            else {
+                throw DurableError.invariant("compact step is missing fields")
+            }
+            return .compact(summary: summary, throughMessageID: throughMessageID)
         default:
             throw DurableError.invariant("unknown script step \(type)")
         }
+    }
+}
+
+/// One tool or subagent call inside a journaled model turn.
+public struct PlannedCall: Sendable, Equatable {
+    public var name: String
+    public var callID: String
+    public var arguments: JSONValue
+    /// When set, the engine runs a child conversation instead of a tool body.
+    public var subagent: Bool
+
+    public init(name: String, callID: String, arguments: JSONValue, subagent: Bool = false) {
+        self.name = name
+        self.callID = callID
+        self.arguments = arguments
+        self.subagent = subagent
+    }
+
+    func json() -> JSONValue {
+        .object([
+            "arguments": arguments,
+            "callID": .string(callID),
+            "name": .string(name),
+            "subagent": .bool(subagent),
+        ])
+    }
+
+    static func parse(_ value: JSONValue) throws -> PlannedCall {
+        guard let fields = value.objectValue,
+              let name = fields["name"]?.stringValue,
+              let callID = fields["callID"]?.stringValue,
+              let arguments = fields["arguments"]
+        else {
+            throw DurableError.invariant("planned call is missing fields")
+        }
+        return PlannedCall(
+            name: name,
+            callID: callID,
+            arguments: arguments,
+            subagent: fields["subagent"]?.boolValue ?? false
+        )
+    }
+}
+
+/// Durable checkpoint for one provider response. Token deltas are not stored.
+public struct ProviderTurnStep: Sendable, Equatable {
+    public var text: String
+    public var thinking: String
+    public var calls: [PlannedCall]
+    public var inputTokens: Int?
+    public var outputTokens: Int?
+    public var stopRaw: String?
+
+    public init(
+        text: String,
+        thinking: String = "",
+        calls: [PlannedCall],
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil,
+        stopRaw: String? = nil
+    ) {
+        self.text = text
+        self.thinking = thinking
+        self.calls = calls
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.stopRaw = stopRaw
+    }
+
+    func json() -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "calls": .array(calls.map { $0.json() }),
+            "text": .string(text),
+            "thinking": .string(thinking),
+            "type": .string("providerTurn"),
+        ]
+        if let inputTokens {
+            fields["inputTokens"] = .int(Int64(inputTokens))
+        }
+        if let outputTokens {
+            fields["outputTokens"] = .int(Int64(outputTokens))
+        }
+        if let stopRaw {
+            fields["stop"] = .string(stopRaw)
+        }
+        return .object(fields)
+    }
+
+    static func parse(_ value: JSONValue) throws -> ProviderTurnStep {
+        guard let fields = value.objectValue, let text = fields["text"]?.stringValue else {
+            throw DurableError.invariant("provider turn is missing text")
+        }
+        let calls = try fields["calls"]?.arrayValue?.map(PlannedCall.parse) ?? []
+        return ProviderTurnStep(
+            text: text,
+            thinking: fields["thinking"]?.stringValue ?? "",
+            calls: calls,
+            inputTokens: fields["inputTokens"]?.intValue.map(Int.init),
+            outputTokens: fields["outputTokens"]?.intValue.map(Int.init),
+            stopRaw: fields["stop"]?.stringValue
+        )
     }
 }
 

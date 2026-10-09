@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "DurableKit", targets: ["DurableKit"]),
         .library(name: "DurableFoundationModels", targets: ["DurableFoundationModels"]),
         .library(name: "PiAI", targets: ["PiAI"]),
+        .library(name: "PiAgent", targets: ["PiAgent"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -48,7 +49,7 @@ let package = Package(
         ),
         .target(
             name: "DurableFoundationModels",
-            dependencies: ["DurableCore"],
+            dependencies: ["DurableCore", "PiAI"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -68,7 +69,21 @@ let package = Package(
             ]
         ),
         .target(
+            name: "PiAgent",
+            dependencies: ["DurableCore", "PiAI"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
             name: "PiAI",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "PiAgentTests",
+            dependencies: ["PiAgent", "PiAI", "DurableCore", "DurableStore", "DurableFoundationModels"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

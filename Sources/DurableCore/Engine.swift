@@ -215,6 +215,37 @@ public actor Engine {
         }
     }
 
+    /// Copies the transcript into a new conversation. Event ids are new. The source log is unchanged.
+    public func fork(_ source: ConversationID) async throws -> ConversationID {
+        try await exclusively {
+            try ensureWritable()
+            let projection = try await load()
+            guard let conversation = projection.conversations[source.raw] else {
+                throw DurableError.invariant("no conversation \(source.raw)")
+            }
+            let child = ConversationID.generate()
+            var drafts = [
+                EventDraft(
+                    type: EventType.conversationOpened,
+                    payload: .object([
+                        "conversationID": .string(child.raw),
+                        "forkedFrom": .string(source.raw),
+                    ])
+                ),
+            ]
+            for message in conversation.messages {
+                drafts.append(Self.messageDraft(
+                    role: message.role,
+                    text: message.text,
+                    messageID: Self.freshMessageID(),
+                    callID: message.callID
+                ))
+            }
+            _ = try await commit(.conversation(child), drafts)
+            return child
+        }
+    }
+
     public func transcript(_ id: ConversationID) async throws -> [TranscriptMessage] {
         try await exclusively {
             let envelopes = try await store.read(stream: .conversation(id))
@@ -314,12 +345,26 @@ public actor Engine {
                     continue
                 }
                 if let inflight = run.inflight {
-                    try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
-                    continue
+                    let openProviderTurn = run.plannedIndex == run.completedSteps && {
+                        if case .providerTurn = run.plannedStep { return true }
+                        return false
+                    }()
+                    if !openProviderTurn {
+                        try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
+                        continue
+                    }
                 }
                 if run.driver == .model {
                     if let planned = run.plannedStep, run.plannedIndex == run.completedSteps {
-                        try await perform(planned, index: run.completedSteps, conversation: conversation, run: run)
+                        if case .providerTurn = planned {
+                            try await perform(planned, index: run.completedSteps, conversation: conversation, run: run)
+                        } else if let inflight = run.inflight {
+                            try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
+                        } else {
+                            try await perform(planned, index: run.completedSteps, conversation: conversation, run: run)
+                        }
+                    } else if let inflight = run.inflight {
+                        try await resolveInflight(conversation: conversation, run: run, inflight: inflight)
                     } else {
                         try await planNext(conversation: conversation, run: run)
                     }
@@ -377,13 +422,16 @@ public actor Engine {
         hash: String,
         script: Script,
         driver: RunDriver,
-        existing: ConversationID?
+        existing: ConversationID?,
+        continueFirst: Bool = true
     ) async throws -> SubmitResult {
         try ensureWritable()
         if requestID.isEmpty {
             throw DurableError.invariant("requestId is empty")
         }
-        _ = try await continueRunning()
+        if continueFirst {
+            _ = try await continueRunning()
+        }
         let conversationID = existing ?? ConversationID.generate()
         let before = try await load()
         if let conversation = before.conversations[conversationID.raw],
@@ -483,9 +531,20 @@ public actor Engine {
         let specs = tools.values.map {
             ModelToolSpec(name: $0.name, effect: $0.effect, summary: $0.summary)
         }.sorted { $0.name < $1.name }
+        var visible = Array(conversation.messages.dropFirst(conversation.promptStartIndex))
+        if let summary = conversation.compactionSummary, !summary.isEmpty {
+            visible.insert(
+                TranscriptMessage(
+                    messageID: "m_compact_\(conversation.id.raw)",
+                    role: "system",
+                    text: summary
+                ),
+                at: 0
+            )
+        }
         return ModelContext(
             conversationID: conversation.id,
-            messages: conversation.messages,
+            messages: visible,
             completedTools: records.map {
                 CompletedToolCall(name: $0.name, callID: $0.callID, arguments: $0.arguments, output: $0.output)
             },
@@ -629,6 +688,25 @@ public actor Engine {
                 isReplay: false,
                 attempt: 1
             )
+        case .compact(let summary, let throughMessageID):
+            _ = try await commit(.conversation(conversation.id), [
+                EventDraft(
+                    type: EventType.contextCompacted,
+                    payload: .object([
+                        "runID": .string(run.id.raw),
+                        "summary": .string(summary),
+                        "throughMessageID": .string(throughMessageID),
+                    ])
+                ),
+                Self.stepDraft(run: run, index: index),
+            ])
+        case .providerTurn(let turn):
+            try await performProviderTurn(
+                turn,
+                index: index,
+                conversation: conversation,
+                run: run
+            )
         }
     }
 
@@ -676,7 +754,8 @@ public actor Engine {
                     output: output,
                     writes: [],
                     replayed: false,
-                    reconciled: true
+                    reconciled: true,
+                    completesStep: !Self.providerTurnIsOpen(run)
                 )
             case .notDone:
                 try await executeBody(
@@ -725,7 +804,8 @@ public actor Engine {
         conversation: FoldedConversation,
         run: FoldedRun,
         isReplay: Bool,
-        attempt: Int
+        attempt: Int,
+        completesStep: Bool = true
     ) async throws {
         let context = effectContext(inflight, conversation: conversation, isReplay: isReplay, attempt: attempt)
         let returned: ToolReturn
@@ -754,7 +834,8 @@ public actor Engine {
             output: returned.output,
             writes: inflight.effect == .transactional ? returned.writes : [],
             replayed: isReplay,
-            reconciled: false
+            reconciled: false,
+            completesStep: completesStep
         )
     }
 
@@ -793,13 +874,15 @@ public actor Engine {
                 var drafts = [
                     Self.approvalResolvedDraft(run: run, approvalID: pending.approvalID, approved: true, reason: nil),
                 ]
-                drafts.append(contentsOf: Self.successDrafts(
+                let completesStep = !Self.providerTurnIsOpen(run)
+            drafts.append(contentsOf: Self.successDrafts(
                     run: run,
                     inflight: inflight,
                     output: output,
                     writes: [],
                     replayed: false,
-                    reconciled: true
+                    reconciled: true,
+                    completesStep: completesStep
                 ))
                 _ = try await commit(.conversation(conversation.id), drafts)
             case .approved:
@@ -828,6 +911,300 @@ public actor Engine {
         }
     }
 
+    private func performProviderTurn(
+        _ turn: ProviderTurnStep,
+        index: Int,
+        conversation: FoldedConversation,
+        run: FoldedRun
+    ) async throws {
+        let done = Set(conversation.toolRecords.filter { $0.runID == run.id.raw }.map(\.callID))
+        let finishedSubagents = Set(run.subagents.filter { $0.value.finished }.map(\.key))
+        let toolCalls = turn.calls.filter { !$0.subagent && !done.contains($0.callID) }
+        let pendingIntents = Set(run.inflightBatch.map(\.callID.raw))
+        var newIntents: [InflightEffect] = []
+        for call in toolCalls where !pendingIntents.contains(call.callID) {
+            if call.callID.isEmpty {
+                throw DurableError.invariant("tool call id is empty")
+            }
+            guard let tool = tools[call.name] else {
+                try await failRun(conversation: conversation, run: run, reason: DurableError.unknownTool(call.name).description)
+                return
+            }
+            let inflight = InflightEffect(
+                stepIndex: index,
+                callID: CallID(call.callID),
+                tool: tool.name,
+                effect: tool.effect,
+                key: EffectKey.derive(storeID: storeIdentifier, conversation: conversation.id, call: CallID(call.callID)),
+                arguments: call.arguments
+            )
+            newIntents.append(inflight)
+        }
+        if !newIntents.isEmpty {
+            _ = try await commit(
+                .conversation(conversation.id),
+                newIntents.map { Self.intentDraft(run: run, inflight: $0) }
+            )
+        }
+
+        let current = try await load()
+        guard let refreshedConversation = current.conversations[conversation.id.raw],
+              let refreshed = refreshedConversation.runs[run.id.raw]
+        else {
+            throw DurableError.invariant("provider turn lost run \(run.id.raw)")
+        }
+        let batch = refreshed.inflightBatch
+        let safe = batch.filter { $0.effect == .pure || $0.effect == .idempotent }
+        let unsafe = batch.filter { $0.effect == .transactional || $0.effect == .external }
+        if !safe.isEmpty {
+            let stopped = try await runSafeBatch(
+                safe,
+                conversation: refreshedConversation,
+                run: refreshed,
+                replayIDs: pendingIntents
+            )
+            if stopped { return }
+        }
+        for inflight in unsafe {
+            let isReplay = pendingIntents.contains(inflight.callID.raw)
+            guard let tool = tools[inflight.tool] else {
+                throw DurableError.unknownTool(inflight.tool)
+            }
+            if isReplay && tool.effect == .external {
+                try await resolveInflight(conversation: refreshedConversation, run: refreshed, inflight: inflight)
+            } else {
+                try await executeBody(
+                    tool: tool,
+                    inflight: inflight,
+                    conversation: refreshedConversation,
+                    run: refreshed,
+                    isReplay: isReplay,
+                    attempt: max(inflight.attempt, 1),
+                    completesStep: false
+                )
+            }
+            let after = try await load()
+            if let latest = after.conversations[conversation.id.raw]?.runs[run.id.raw],
+               latest.status == .failed || latest.status == .suspended || latest.retryHold != nil
+            {
+                return
+            }
+        }
+
+        let afterTools = try await load()
+        guard var parent = afterTools.conversations[conversation.id.raw],
+              var parentRun = parent.runs[run.id.raw]
+        else {
+            throw DurableError.invariant("provider turn lost run \(run.id.raw)")
+        }
+        if parentRun.status != .running || parentRun.retryHold != nil || parentRun.inflight != nil {
+            return
+        }
+        for call in turn.calls where call.subagent && !finishedSubagents.contains(call.callID) {
+            try await runSubagent(call, index: index, conversation: parent, run: parentRun)
+            let again = try await load()
+            guard let next = again.conversations[conversation.id.raw],
+                  let nextRun = next.runs[run.id.raw]
+            else {
+                return
+            }
+            parent = next
+            parentRun = nextRun
+            if parentRun.status != .running {
+                return
+            }
+        }
+
+        var closing: [EventDraft] = []
+        let assistantID = "m_turn_\(run.id.raw)_\(index)"
+        if !turn.text.isEmpty, !parent.messages.contains(where: { $0.messageID == assistantID }) {
+            closing.append(Self.messageDraft(role: "assistant", text: turn.text, messageID: assistantID))
+        }
+        closing.append(Self.stepDraft(run: parentRun, index: index))
+        _ = try await commit(.conversation(conversation.id), closing)
+    }
+
+    private struct ToolOutcome: Sendable {
+        var inflight: InflightEffect
+        var output: JSONValue
+        var writes: [StateWrite]
+        var error: String?
+        var crashed: Bool
+    }
+
+    private func runSafeBatch(
+        _ batch: [InflightEffect],
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        replayIDs: Set<String>
+    ) async throws -> Bool {
+        let jobs: [(InflightEffect, Tool, EffectContext)] = try batch.map { inflight in
+            guard let tool = tools[inflight.tool] else {
+                throw DurableError.unknownTool(inflight.tool)
+            }
+            let replay = replayIDs.contains(inflight.callID.raw) || inflight.attempt > 1
+            let attempt = replay && inflight.attempt <= 1 ? 2 : max(inflight.attempt, 1)
+            let context = effectContext(
+                inflight,
+                conversation: conversation,
+                isReplay: replay,
+                attempt: attempt
+            )
+            return (inflight, tool, context)
+        }
+        let tasks = jobs.map { inflight, tool, context in
+            Task.detached {
+                do {
+                    let returned = try await tool.run(inflight.arguments, context)
+                    return ToolOutcome(
+                        inflight: inflight,
+                        output: returned.output,
+                        writes: returned.writes,
+                        error: nil,
+                        crashed: false
+                    )
+                } catch is SimulatedProcessCrash {
+                    return ToolOutcome(inflight: inflight, output: .null, writes: [], error: nil, crashed: true)
+                } catch {
+                    return ToolOutcome(
+                        inflight: inflight,
+                        output: .null,
+                        writes: [],
+                        error: String(describing: error),
+                        crashed: false
+                    )
+                }
+            }
+        }
+        var outcomes: [ToolOutcome] = []
+        for task in tasks {
+            outcomes.append(await task.value)
+        }
+        if outcomes.contains(where: \.crashed) {
+            poisoned = true
+            throw SimulatedProcessCrash()
+        }
+        let successes = outcomes.filter { $0.error == nil }
+        if !successes.isEmpty {
+            var drafts: [EventDraft] = []
+            for outcome in successes {
+                if outcome.inflight.effect != .transactional && !outcome.writes.isEmpty {
+                    try await failInflight(
+                        conversation: conversation,
+                        run: run,
+                        inflight: outcome.inflight,
+                        error: DurableError.invariant("only transactional tools may return state writes")
+                    )
+                    return true
+                }
+                drafts.append(contentsOf: Self.successDrafts(
+                    run: run,
+                    inflight: outcome.inflight,
+                    output: outcome.output,
+                    writes: outcome.inflight.effect == .transactional ? outcome.writes : [],
+                    replayed: outcome.inflight.attempt > 1,
+                    reconciled: false,
+                    completesStep: false
+                ))
+            }
+            _ = try await commit(.conversation(conversation.id), drafts)
+        }
+        if let failure = outcomes.first(where: { $0.error != nil }) {
+            try await failInflight(
+                conversation: conversation,
+                run: run,
+                inflight: failure.inflight,
+                error: DurableError.invariant(failure.error ?? "tool failed")
+            )
+            return true
+        }
+        return false
+    }
+
+    private func runSubagent(
+        _ call: PlannedCall,
+        index: Int,
+        conversation: FoldedConversation,
+        run: FoldedRun
+    ) async throws {
+        let goal: String
+        if let text = call.arguments.objectValue?["goal"]?.stringValue {
+            goal = text
+        } else {
+            goal = Self.display(call.arguments)
+        }
+        let childID: ConversationID
+        if let existing = run.subagents[call.callID] {
+            childID = ConversationID(raw: existing.conversationID)
+        } else {
+            childID = ConversationID(raw: "child:\(conversation.id.raw):\(run.id.raw):\(index):\(call.callID)")
+            _ = try await commit(.conversation(conversation.id), [
+                EventDraft(
+                    type: EventType.subagentStarted,
+                    payload: .object([
+                        "runID": .string(run.id.raw),
+                        "stepIndex": .int(Int64(index)),
+                        "callID": .string(call.callID),
+                        "name": .string(call.name),
+                        "goal": .string(goal),
+                        "childConversationID": .string(childID.raw),
+                    ])
+                ),
+            ])
+        }
+        let requestID = "childreq:\(run.id.raw):\(index):\(call.callID)"
+        let projection = try await load()
+        let child = projection.conversations[childID.raw]
+        let settled: StatusView
+        if let child, child.latestRun?.status == .completed || child.latestRun?.status == .failed {
+            settled = Self.view(of: child)
+        } else if child?.activeRun != nil {
+            settled = try await advance(childID)
+        } else {
+            let submitted = try await accept(
+                text: goal,
+                requestID: requestID,
+                hash: Submission.modelTurnHash(text: goal),
+                script: Script(steps: []),
+                driver: .model,
+                existing: childID,
+                continueFirst: false
+            )
+            settled = StatusView(
+                queued: submitted.queued,
+                runStatus: submitted.runStatus,
+                resumeToken: submitted.resumeToken,
+                finalText: submitted.finalText,
+                failure: submitted.failure
+            )
+        }
+        guard settled.runStatus == .completed else {
+            try await failRun(
+                conversation: conversation,
+                run: run,
+                reason: settled.failure ?? "subagent \(call.name) ended \(String(describing: settled.runStatus))"
+            )
+            return
+        }
+        _ = try await commit(.conversation(conversation.id), [
+            EventDraft(
+                type: EventType.subagentFinished,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "callID": .string(call.callID),
+                    "childConversationID": .string(childID.raw),
+                    "finalText": .string(settled.finalText ?? ""),
+                ])
+            ),
+            Self.messageDraft(
+                role: "tool",
+                text: settled.finalText ?? "",
+                messageID: Self.freshMessageID(),
+                callID: call.callID
+            ),
+        ])
+    }
+
     private func commitSuccess(
         conversation: FoldedConversation,
         run: FoldedRun,
@@ -835,7 +1212,8 @@ public actor Engine {
         output: JSONValue,
         writes: [StateWrite],
         replayed: Bool,
-        reconciled: Bool
+        reconciled: Bool,
+        completesStep: Bool = true
     ) async throws {
         _ = try await commit(
             .conversation(conversation.id),
@@ -845,7 +1223,8 @@ public actor Engine {
                 output: output,
                 writes: writes,
                 replayed: replayed,
-                reconciled: reconciled
+                reconciled: reconciled,
+                completesStep: completesStep
             )
         )
     }
@@ -1188,7 +1567,8 @@ public actor Engine {
         output: JSONValue,
         writes: [StateWrite],
         replayed: Bool,
-        reconciled: Bool
+        reconciled: Bool,
+        completesStep: Bool = true
     ) -> [EventDraft] {
         var drafts = [
             resultDraft(
@@ -1217,8 +1597,18 @@ public actor Engine {
             messageID: freshMessageID(),
             callID: inflight.callID.raw
         ))
-        drafts.append(stepDraft(run: run, index: inflight.stepIndex))
+        if completesStep {
+            drafts.append(stepDraft(run: run, index: inflight.stepIndex))
+        }
         return drafts
+    }
+
+    private static func providerTurnIsOpen(_ run: FoldedRun) -> Bool {
+        guard run.plannedIndex == run.completedSteps, let planned = run.plannedStep else {
+            return false
+        }
+        if case .providerTurn = planned { return true }
+        return false
     }
 
     private static func approvalResolvedDraft(

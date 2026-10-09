@@ -1,5 +1,6 @@
 import DurableCore
 import Foundation
+import PiAI
 
 public enum FoundationModelsSupport {
     #if canImport(FoundationModels)
@@ -7,6 +8,13 @@ public enum FoundationModelsSupport {
     #else
     public static let compiledIn = false
     #endif
+}
+
+/// `FoundationModelsProvider` exists only when the Apple framework is importable.
+/// This Linux build does not compile that adapter. It uses `respond(to:)`, which this
+/// repo has checked against Apple's docs, and yields one text or tool-call checkpoint.
+public enum FoundationModelsProviderSupport {
+    public static let compiledIn = FoundationModelsSupport.compiledIn
 }
 
 #if canImport(FoundationModels)
@@ -171,6 +179,62 @@ public struct FoundationModelsStep: ModelStep {
         }
         lines.append("Call at most one tool, or answer if the tool results above are enough.")
         return lines.joined(separator: "\n")
+    }
+}
+
+/// On-device provider for `PiAgentStep`. One `respond` call is one checkpoint.
+/// Streaming partial tokens from Foundation Models is not used here; that API was not
+/// compiled in this environment.
+@available(iOS 26, macOS 26, *)
+public struct FoundationModelsProvider: ModelProvider {
+    public var instructions: String
+    public var makeTools: @Sendable (FoundationToolCapture) -> [any FoundationModels.Tool]
+
+    public init(
+        instructions: String,
+        makeTools: @escaping @Sendable (FoundationToolCapture) -> [any FoundationModels.Tool] = { _ in [] }
+    ) {
+        self.instructions = instructions
+        self.makeTools = makeTools
+    }
+
+    public func stream(_ request: ModelRequest) -> AsyncThrowingStream<ModelStreamEvent, Error> {
+        let instructions = request.instructions.isEmpty ? self.instructions : request.instructions
+        let makeTools = self.makeTools
+        let prompt = request.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n")
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                let capture = FoundationToolCapture()
+                let session = LanguageModelSession(
+                    model: SystemLanguageModel.default,
+                    tools: makeTools(capture)
+                ) {
+                    instructions
+                }
+                do {
+                    let response = try await session.respond(to: Prompt(prompt))
+                    continuation.yield(.textDelta(response.content))
+                    continuation.yield(.stop(StopReason(raw: "end_turn")))
+                    continuation.finish()
+                } catch let error as LanguageModelSession.ToolCallError {
+                    if let call = capture.take() {
+                        let arguments = call.arguments.canonicalJSON()
+                        continuation.yield(.toolCall(ProviderToolCall(
+                            id: "fm-\(call.name)",
+                            name: call.name,
+                            argumentsJSON: arguments
+                        )))
+                        continuation.yield(.stop(StopReason(raw: "tool_use")))
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }
 #endif
