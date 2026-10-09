@@ -44,6 +44,8 @@ public enum EventType {
     public static let skillResolved = "skill.resolved"
     public static let skillActivated = "skill.activated"
     public static let skillResource = "skill.resource"
+    public static let notificationDecided = "notification.decided"
+    public static let approvalPolicy = "approval.policy"
 
     public static let messageAppendedCurrentVersion = 2
 }

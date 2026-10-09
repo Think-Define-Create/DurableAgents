@@ -33,6 +33,7 @@ let package = Package(
         .library(name: "DurableSkills", targets: ["DurableSkills"]),
         .library(name: "DurableRetrieval", targets: ["DurableRetrieval"]),
         .library(name: "DurableMemory", targets: ["DurableMemory"]),
+        .library(name: "DurablePolicy", targets: ["DurablePolicy"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -352,6 +353,20 @@ let package = Package(
         .testTarget(
             name: "DurableMemoryTests",
             dependencies: ["DurableMemory", "DurableCore", "DurableStore", "DurableRetrieval"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurablePolicy",
+            dependencies: ["DurableCore", "DurableSchedule"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurablePolicyTests",
+            dependencies: ["DurablePolicy", "DurableCore", "DurableStore", "DurableSchedule"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

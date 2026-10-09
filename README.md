@@ -32,6 +32,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableSkills` | `SKILL.md` registry. Scripts are listed as text and are never executed. Agent edits stay proposals. |
 | `DurableRetrieval` | Hash embeddings, cosine, and reciprocal-rank fusion. No Apple Natural Language import. |
 | `DurableMemory` | Derived GRDB index of facts and a knowledge graph. The event log stays the source of truth. |
+| `DurablePolicy` | Notification quiet hours, daily cap, and dedupe. Approval rules that cannot clear an external effect while unattended. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -136,6 +137,10 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 `DurableMemory` rebuilds a GRDB file from `state.wrote` events. The sqlite file is a derived index, not a second ciphertext. Emails become `[redacted-email]` and `sk-…` tokens become `[redacted-secret]` before they are stored. Search mixes FTS5 with cosine and fuses the two lists. `memory.remember` and `memory.forget` are transactional: they return `StateWrite`s and do not write SQLite themselves. `memory.search` and `memory.open` are pure and rebuild from the log first. `shred` and `decay` journal tombstones, then rebuild.
 
 When `DurableMCPServer` is created with a `MemoryIndex`, it also exposes `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, and `open_nodes`. Those handlers append to the log and rebuild. Do not call them from a tool on the same engine.
+
+## Notification and approval policy
+
+`DurablePolicy` decides whether a local notification is shown and whether a tool call still needs a person. `NotificationPolicy` checks quiet hours first (the same `QuietHours` window as routines: outside it, nothing is sent and the daily cap is not spent), then a dedupe key, then a daily cap counted in that time zone. The decision carries a collapse id. `ApprovalPolicy` takes the first matching rule. A rule can force approval, including by argument and time of day. Unattended mode never auto-approves an external effect, even when a rule says to and even when the tool flag does not require approval. An attended rule may still auto-approve. Rulings are `notification.decided` and `approval.policy` on the `policy` stream, each with a rule id. The engine's own gate is still `Tool.requiresApproval`. Call the journal from the host, not from inside a tool.
 
 ## Routines
 
