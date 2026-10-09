@@ -140,14 +140,21 @@ import Darwin
     let body = try JSONValue.parse(String(decoding: request.body, as: UTF8.self))
     #expect(body["delivery-id"]?.stringValue == "fx:store:conv:deliver")
     #expect(body["aps"]?["alert"]?.stringValue == "Approve")
+    #if canImport(Darwin)
+    #expect(APNsSupport.liveSenderCompiled)
+    #else
     #expect(!APNsSupport.liveSenderCompiled)
+    #endif
 }
 
+/// On Darwin the sender is live and would reach Apple, so this runs only where it is stubbed.
+#if !canImport(Darwin)
 @Test func liveAPNsSenderIsUnavailableOnLinux() async {
     await #expect(throws: DeliveryRetry.self) {
         try await APNsLiveSender().send(url: "https://api.push.apple.com/3/device/abc", method: "POST", headers: [:], body: Data())
     }
 }
+#endif
 
 @Test func webhookRetriesOnServerErrorWithTheSameIdempotencyKey() async throws {
     let http = ScriptedHTTP(responses: [ScriptedStatus(503), ScriptedStatus(200)])
@@ -613,7 +620,12 @@ private final class LoopbackHTTPServer: @unchecked Sendable {
         #if canImport(Glibc) || canImport(Musl)
         _ = signal(SIGPIPE, SIG_IGN)
         #endif
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #if canImport(Glibc) || canImport(Musl)
+        let streamType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let streamType = SOCK_STREAM
+        #endif
+        let fd = socket(AF_INET, streamType, 0)
         guard fd >= 0 else {
             throw LoopbackError("socket")
         }

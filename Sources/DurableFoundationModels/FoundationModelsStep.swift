@@ -132,14 +132,29 @@ public struct FoundationModelsStep: ModelStep {
                 throw error
             }
             return step(for: call, context: context, gates: gates)
-        } catch let error as LanguageModelError {
-            if case .contextSizeExceeded = error {
+        } catch {
+            if isContextOverflow(error) {
                 throw DurableError.invariant(
                     "on-device context window exceeded (4096 tokens, including tool schemas)"
                 )
             }
             throw error
         }
+    }
+
+    /// `LanguageModelError` replaces `GenerationError` from macOS 27; check both.
+    @available(iOS 26, macOS 26, *)
+    private static func isContextOverflow(_ error: any Error) -> Bool {
+        if #available(iOS 27, macOS 27, *),
+           let error = error as? LanguageModelError,
+           case .contextSizeExceeded = error {
+            return true
+        }
+        if let error = error as? LanguageModelSession.GenerationError,
+           case .exceededContextWindowSize = error {
+            return true
+        }
+        return false
     }
 
     private static func step(

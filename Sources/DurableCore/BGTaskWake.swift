@@ -1,14 +1,14 @@
 import Foundation
 
 public enum BackgroundWakeSupport {
-    #if canImport(BackgroundTasks)
+    #if canImport(BackgroundTasks) && !os(macOS)
     public static let appleSchedulerCompiled = true
     #else
     public static let appleSchedulerCompiled = false
     #endif
 }
 
-#if canImport(BackgroundTasks)
+#if canImport(BackgroundTasks) && !os(macOS)
 import BackgroundTasks
 
 /// Submits a `BGAppRefreshTaskRequest` so iOS can wake the app around a journaled timer.

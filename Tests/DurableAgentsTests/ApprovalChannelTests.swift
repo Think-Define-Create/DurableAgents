@@ -150,8 +150,13 @@ actor NoticeBox {
     await engine.close()
 }
 
-@Test func appleApprovalFrameworksAreNotCompiledHere() {
+@Test func appleApprovalFrameworksMatchThePlatform() {
+    #if canImport(Darwin)
+    #expect(ApprovalAppleSupport.localAuthenticationCompiled)
+    #expect(ApprovalAppleSupport.userNotificationsCompiled)
+    #else
     #expect(ApprovalAppleSupport.localAuthenticationCompiled == false)
     #expect(ApprovalAppleSupport.activityKitCompiled == false)
     #expect(ApprovalAppleSupport.userNotificationsCompiled == false)
+    #endif
 }

@@ -49,7 +49,11 @@ import Darwin
     #expect(!MCPReconnect.shouldRetry(connectionClosed: true, alreadyRetried: true))
     #expect(!MCPReconnect.shouldRetry(connectionClosed: false, alreadyRetried: false))
     #expect(MCPPlatform.stdioAvailable)
+    #if os(Linux)
     #expect(MCPPlatform.sseStreamingCompiled == false)
+    #else
+    #expect(MCPPlatform.sseStreamingCompiled)
+    #endif
 }
 
 @Test func serverConfigKeepsAccountNamesAndRejectsAnEmptyAllowlist() throws {
@@ -497,7 +501,12 @@ private final class MCPLoopback: @unchecked Sendable {
         #if canImport(Glibc) || canImport(Musl)
         _ = signal(SIGPIPE, SIG_IGN)
         #endif
-        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #if canImport(Glibc) || canImport(Musl)
+        let streamType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let streamType = SOCK_STREAM
+        #endif
+        let fd = socket(AF_INET, streamType, 0)
         guard fd >= 0 else { throw MCPCallError("socket") }
         var yes: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout.size(ofValue: yes)))

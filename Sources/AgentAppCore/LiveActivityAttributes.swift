@@ -1,4 +1,4 @@
-#if canImport(ActivityKit)
+#if canImport(ActivityKit) && !os(macOS)
 import ActivityKit
 
 /// Shared by the app and the widget extension so Live Activity state is the same type.
