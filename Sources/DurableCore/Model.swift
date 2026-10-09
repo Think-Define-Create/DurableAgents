@@ -24,6 +24,8 @@ public enum EventType {
     public static let contextCompacted = "context.compacted"
     public static let subagentStarted = "subagent.started"
     public static let subagentFinished = "subagent.finished"
+    public static let retentionHold = "retention.hold"
+    public static let retentionPurged = "retention.purged"
 
     public static let messageAppendedCurrentVersion = 2
 }

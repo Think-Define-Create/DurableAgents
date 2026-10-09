@@ -19,9 +19,11 @@ let package = Package(
         .library(name: "DurableFoundationModels", targets: ["DurableFoundationModels"]),
         .library(name: "PiAI", targets: ["PiAI"]),
         .library(name: "PiAgent", targets: ["PiAgent"]),
+        .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.12.3"..<"3.15.0"),
     ],
     targets: [
         .target(
@@ -69,6 +71,16 @@ let package = Package(
             ]
         ),
         .target(
+            name: "DurableSecurity",
+            dependencies: [
+                "DurableCore",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
             name: "PiAgent",
             dependencies: ["DurableCore", "PiAI"],
             swiftSettings: [
@@ -77,6 +89,13 @@ let package = Package(
         ),
         .target(
             name: "PiAI",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableSecurityTests",
+            dependencies: ["DurableSecurity", "DurableCore", "DurableStore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

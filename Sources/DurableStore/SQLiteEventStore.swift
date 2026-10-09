@@ -180,6 +180,19 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    public func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws {
+        try await dbQueue.write { database in
+            let existing = try Self.fetchLease(database)
+            guard let existing, existing.owner == fence.owner, existing.epoch == fence.epoch else {
+                throw DurableError.fenced(expectedEpoch: fence.epoch, actualEpoch: existing?.epoch ?? 0)
+            }
+            try database.execute(
+                sql: "UPDATE events SET payload = ? WHERE global_seq = ?",
+                arguments: [payload.canonicalJSON(), Int64(globalSeq)]
+            )
+        }
+    }
+
     private static func migrate(_ database: Database) throws {
         let version = try Int.fetchOne(database, sql: "PRAGMA user_version") ?? 0
         if version > 1 {

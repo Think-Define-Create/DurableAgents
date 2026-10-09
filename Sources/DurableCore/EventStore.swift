@@ -16,4 +16,7 @@ public protocol EventStore: Sendable {
     func readAll() async throws -> [EventEnvelope]
 
     func read(stream: StreamID) async throws -> [EventEnvelope]
+
+    /// Replaces one stored payload. Sequence numbers stay put. Used by retention purge.
+    func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws
 }

@@ -146,6 +146,9 @@ struct Projection {
     }
 
     mutating func apply(_ event: EventEnvelope) throws {
+        if event.payload["purged"]?.boolValue == true {
+            return
+        }
         switch event.type {
         case EventType.timerRequested:
             let name = event.payload["name"]?.stringValue ?? "timer-\(event.globalSeq)"
@@ -400,6 +403,8 @@ struct Projection {
                 record.finalText = event.payload["finalText"]?.stringValue
                 run.subagents[callID] = record
             }
+        case EventType.retentionHold, EventType.retentionPurged:
+            return
         case EventType.runFailed:
             let reason = event.payload["reason"]?.stringValue ?? "failed"
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in

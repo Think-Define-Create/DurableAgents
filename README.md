@@ -141,6 +141,14 @@ When the prompt grows past `compactAfterMessages`, the step journals `context.co
 
 `FoundationModelsProvider` adapts Apple's on-device `LanguageModelSession.respond(to:)` to the same `ModelProvider` loop. It is compiled only when Foundation Models is available. This environment did not compile it. Partial token streaming from that framework is not wired.
 
+## Security (`DurableSecurity`)
+
+`EncryptingEventStore` wraps any `EventStore`. It redacts payloads, then seals them with AES-GCM (swift-crypto, the same API as CryptoKit). The engine and `read` see plaintext. The inner log stores ciphertext. Keys come from `ConversationKeyProvider` (`MemoryKeyProvider`, `FileKeyProvider`, and `KeychainKeyProvider` where Security is available). `shred` deletes the key so the ciphertext cannot be opened.
+
+`BuiltInRedactor` runs before that seal. It matches SSNs, Luhn-valid card numbers, labeled account and routing numbers, emails, phone numbers, `Authorization: Bearer` values, `sk-` tokens, and `x-api-key` values. Extra patterns can be added. With a `TokenVault`, the replacement is a token and the secret stays in the vault, not the log.
+
+`Retention.purge` rewrites expired payloads for the selected event types to `{"purged": true}` and appends `retention.purged`. Sequence numbers stay. A stream with `retention.hold` set is skipped.
+
 ## DurableKit
 
 `ConversationModel` is a `@MainActor` class. When the Observation module is present it is also `@Observable`. It exposes `messages`, `status` (`idle`, `running`, `suspendedForApproval`, `failed`, `done`), `pendingApproval`, the `events` array, and `eventLog` (an `AsyncStream` of envelopes observed after the model is opened). `send` starts a model turn. `approve` and `reject` resume the pending token. `recoverOnLaunch` continues a running journal and reloads a suspended one. `close` drops the lease, which in-process tests need because the pid is still alive.
@@ -182,7 +190,7 @@ To run the package suite in Xcode, open `Package.swift`, wait for package resolu
 
 Formatting is [swift-format](https://github.com/swiftlang/swift-format) with the `.swift-format` file in the repo root. SwiftLint is not used. No GitHub Actions workflow is required to build or test.
 
-On Linux, install `libsqlite3-dev` and a Swift 6.1+ toolchain, then run the same `swift test`.
+On Linux, install `libsqlite3-dev`, a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
 
 ## Short example
 

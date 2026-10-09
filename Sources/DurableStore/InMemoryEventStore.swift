@@ -94,6 +94,23 @@ public actor InMemoryEventStore: EventStore {
         events.filter { $0.stream == stream }
     }
 
+    public func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws {
+        try requireFence(fence)
+        guard let index = events.firstIndex(where: { $0.globalSeq == globalSeq }) else {
+            throw DurableError.invariant("no event \(globalSeq)")
+        }
+        let existing = events[index]
+        events[index] = EventEnvelope(
+            globalSeq: existing.globalSeq,
+            stream: existing.stream,
+            streamSeq: existing.streamSeq,
+            type: existing.type,
+            schemaVersion: existing.schemaVersion,
+            recordedAt: existing.recordedAt,
+            payload: payload
+        )
+    }
+
     private func requireFence(_ fence: FenceToken) throws {
         guard let lease, lease.owner == fence.owner, lease.epoch == fence.epoch else {
             throw DurableError.fenced(expectedEpoch: fence.epoch, actualEpoch: lease?.epoch ?? 0)
