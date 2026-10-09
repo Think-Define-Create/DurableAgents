@@ -32,6 +32,10 @@ public actor EncryptingEventStore: EventStore {
         try await inner.acquireLease(owner: owner, pid: pid, ttl: ttl)
     }
 
+    public func renewLease(fence: FenceToken, ttl: Duration) async throws -> Lease {
+        try await inner.renewLease(fence: fence, ttl: ttl)
+    }
+
     public func releaseLease(fence: FenceToken) async throws {
         try await inner.releaseLease(fence: fence)
     }

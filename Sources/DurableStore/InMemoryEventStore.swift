@@ -56,6 +56,15 @@ public actor InMemoryEventStore: EventStore {
         }
     }
 
+    public func renewLease(fence: FenceToken, ttl: Duration) async throws -> Lease {
+        guard var current = lease, current.owner == fence.owner, current.epoch == fence.epoch else {
+            throw DurableError.fenced(expectedEpoch: fence.epoch, actualEpoch: lease?.epoch ?? 0)
+        }
+        current.expiresAt = clock.now().addingTimeInterval(ttl.timeInterval)
+        lease = current
+        return current
+    }
+
     public func releaseLease(fence: FenceToken) async throws {
         try requireFence(fence)
         highWater = max(highWater, fence.epoch)

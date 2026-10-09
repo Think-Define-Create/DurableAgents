@@ -98,6 +98,22 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    public func renewLease(fence: FenceToken, ttl: Duration) async throws -> Lease {
+        let now = clock.now()
+        return try await dbQueue.write { database in
+            let existing = try Self.fetchLease(database)
+            guard let existing, existing.owner == fence.owner, existing.epoch == fence.epoch else {
+                throw DurableError.fenced(expectedEpoch: fence.epoch, actualEpoch: existing?.epoch ?? 0)
+            }
+            let expires = now.addingTimeInterval(ttl.timeInterval)
+            try database.execute(
+                sql: "UPDATE lease SET expires_at = ? WHERE epoch = ?",
+                arguments: [expires.timeIntervalSince1970, Int64(existing.epoch)]
+            )
+            return Lease(owner: existing.owner, epoch: existing.epoch, pid: existing.pid, expiresAt: expires)
+        }
+    }
+
     public func releaseLease(fence: FenceToken) async throws {
         try await dbQueue.write { database in
             let existing = try Self.fetchLease(database)

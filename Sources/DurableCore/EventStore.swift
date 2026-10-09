@@ -8,6 +8,9 @@ public protocol EventStore: Sendable {
 
     func acquireLease(owner: UUID, pid: Int32, ttl: Duration) async throws -> Lease
 
+    /// Extends the current lease. Does not grant a new epoch and does not steal an expired lease.
+    func renewLease(fence: FenceToken, ttl: Duration) async throws -> Lease
+
     func releaseLease(fence: FenceToken) async throws
 
     /// Atomically appends `events` if `fence.epoch` is still current.

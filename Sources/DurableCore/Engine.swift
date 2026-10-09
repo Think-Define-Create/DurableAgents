@@ -28,6 +28,10 @@ public actor Engine {
     private var pendingDeliveries: [JournaledDelivery] = []
     /// Set only while starting a delivery run, so deliveries use `RetryPolicy.standard`.
     private var policyOverride: RetryPolicy?
+    private let leaseTTL: Duration
+    private var keepAliveTask: Task<Void, Never>?
+    /// Set when a renewal fails because the fence no longer matches. Later commits are rejected.
+    public private(set) var fencedOut = false
 
     public init(
         store: any EventStore,
@@ -69,6 +73,35 @@ public actor Engine {
         self.owner = owner
         self.fence = lease.fence
         self.storeIdentifier = try await store.storeID()
+        self.leaseTTL = leaseTTL
+        startKeepAlive()
+    }
+
+    /// Extends the lease without changing the epoch. A failed renewal stops the engine.
+    public func renewNow() async {
+        if closed || fencedOut { return }
+        do {
+            _ = try await store.renewLease(fence: fence, ttl: leaseTTL)
+        } catch {
+            if !closed {
+                fencedOut = true
+                poisoned = true
+                keepAliveTask?.cancel()
+                keepAliveTask = nil
+            }
+        }
+    }
+
+    private func startKeepAlive() {
+        let interval = leaseTTL / 3
+        guard interval > .zero else { return }
+        keepAliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled { return }
+                await self?.renewNow()
+            }
+        }
     }
 
     public var ownerID: UUID { owner }
@@ -294,9 +327,12 @@ public actor Engine {
     /// Drops the lease without writing a domain event. In-process crash tests use this
     /// where a real process death would drop the lease by exiting.
     public func close() async {
+        let already = closed
+        closed = true
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
         await lock()
-        if !closed {
-            closed = true
+        if !already {
             do {
                 try await store.releaseLease(fence: fence)
             } catch {
