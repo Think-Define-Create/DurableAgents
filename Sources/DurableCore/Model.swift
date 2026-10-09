@@ -35,6 +35,10 @@ public enum EventType {
     public static let routineDefined = "routine.defined"
     public static let routineFired = "routine.fired"
     public static let routineSkipped = "routine.skipped"
+    public static let identitySet = "identity.document.set"
+    public static let identityProposed = "identity.document.proposed"
+    public static let identityResolved = "identity.document.resolved"
+    public static let identityAssembled = "identity.assembled"
 
     public static let messageAppendedCurrentVersion = 2
 }

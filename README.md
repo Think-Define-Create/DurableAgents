@@ -28,6 +28,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
 | `durable-import` | CLI for that importer. |
 | `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. No Apple imports on the Linux path. |
+| `DurableIdentity` | Versioned soul, identity, user, rules, and memory digest. Agent edits stay proposals until a person approves them. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
