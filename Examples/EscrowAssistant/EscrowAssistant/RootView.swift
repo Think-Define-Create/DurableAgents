@@ -17,6 +17,14 @@ struct RootView: View {
             .navigationTitle("Escrow")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink {
+                        MCPServersView(directory: app.world.directory)
+                    } label: {
+                        Text("MCP")
+                    }
+                    .accessibilityIdentifier("mcpServers")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
                         EventLogView(events: app.conversation.events)

@@ -241,6 +241,8 @@ The status line shows the planner. The provider menu chooses Apple on-device, An
 
 The journal file is encrypted at rest with `EncryptingEventStore` and `BuiltInRedactor`. On Apple the data key is in the Keychain. The Event log screen lists the journal as the app sees it, which is plaintext after the wrapper decrypts.
 
+**MCP** in the toolbar saves optional server configs to `EscrowAssistant/mcp-servers.json`. Each entry is an `MCPServerConfig`: name, `stdio` or `http`, command or URL, an allowlist, and secret-account names for an environment variable or a header. The file stores account names, never secret values. An empty allowlist exposes no tools. This screen does not dial the server and does not add the remote tools to the chat. A host that wants them calls `MCPClientSession.connect` and `MCPToolBridge.makeTools`. stdio is saved for a Mac or Linux host; this iOS build cannot launch a subprocess. Destructive and hint-less MCP tools still require approval before they run, and tool descriptions from a server are untrusted. See MCP security above. This screen was not compiled or opened here.
+
 ### Crash demo
 
 1. Tap **Crash now**. That arms a flag and submits a scripted `sendEmail` turn, so the demo does not depend on the model choosing the tool.
