@@ -15,6 +15,7 @@ public actor Engine {
     private let clock: any DurableClock
     private let jitter: any JitterSource
     private let backgroundWake: any BackgroundWakeScheduling
+    private let tracing: any RunTracing
     private let owner: UUID
     private var fence: FenceToken
     private let storeIdentifier: String
@@ -32,6 +33,7 @@ public actor Engine {
         clock: any DurableClock = SystemDurableClock(),
         jitter: any JitterSource = ZeroJitter(),
         backgroundWake: any BackgroundWakeScheduling = NoOpBackgroundWake(),
+        tracing: any RunTracing = NoOpTracing(),
         leaseTTL: Duration = .seconds(30),
         owner: UUID = UUID()
     ) async throws {
@@ -59,6 +61,7 @@ public actor Engine {
         self.clock = clock
         self.jitter = jitter
         self.backgroundWake = backgroundWake
+        self.tracing = ScrubbingTracer(inner: tracing)
         self.owner = owner
         self.fence = lease.fence
         self.storeIdentifier = try await store.storeID()
@@ -311,6 +314,27 @@ public actor Engine {
     }
 
     private func advance(_ id: ConversationID) async throws -> StatusView {
+        let span = await tracing.begin(name: "run", attributes: [
+            "conversation": .string(id.raw),
+        ])
+        do {
+            let view = try await advanceLoop(id)
+            var ended: [String: SpanAttribute] = [:]
+            if let status = view.runStatus {
+                ended["status"] = .string(status.rawValue)
+            }
+            await tracing.end(span, attributes: ended)
+            return view
+        } catch is SimulatedProcessCrash {
+            await tracing.end(span, attributes: ["status": .string("crashed")])
+            throw SimulatedProcessCrash()
+        } catch {
+            await tracing.end(span, attributes: ["status": .string("error")])
+            throw error
+        }
+    }
+
+    private func advanceLoop(_ id: ConversationID) async throws -> StatusView {
         for _ in 0..<10_000 {
             let projection = try await load()
             guard let conversation = projection.conversations[id.raw] else {
@@ -505,12 +529,19 @@ public actor Engine {
             return
         }
         let step: ScriptedStep
+        let planSpan = await tracing.begin(name: "model.plan", attributes: [
+            "conversation": .string(conversation.id.raw),
+            "step": .int(run.completedSteps),
+        ])
         do {
             step = try await model.plan(context: modelContext(for: conversation, run: run))
+            await tracing.end(planSpan, attributes: [:])
         } catch is SimulatedProcessCrash {
+            await tracing.end(planSpan, attributes: ["status": .string("crashed")])
             poisoned = true
             throw SimulatedProcessCrash()
         } catch {
+            await tracing.end(planSpan, attributes: ["status": .string("error")])
             try await failRun(conversation: conversation, run: run, reason: String(describing: error))
             return
         }
@@ -808,13 +839,22 @@ public actor Engine {
         completesStep: Bool = true
     ) async throws {
         let context = effectContext(inflight, conversation: conversation, isReplay: isReplay, attempt: attempt)
+        let effectSpan = await tracing.begin(name: "effect", attributes: [
+            "call": .string(inflight.callID.raw),
+            "conversation": .string(conversation.id.raw),
+            "kind": .string(inflight.effect.rawValue),
+            "tool": .string(inflight.tool),
+        ])
         let returned: ToolReturn
         do {
             returned = try await tool.run(inflight.arguments, context)
+            await tracing.end(effectSpan, attributes: ["status": .string("ok")])
         } catch is SimulatedProcessCrash {
+            await tracing.end(effectSpan, attributes: ["status": .string("crashed")])
             poisoned = true
             throw SimulatedProcessCrash()
         } catch {
+            await tracing.end(effectSpan, attributes: ["status": .string("error")])
             try await failInflight(conversation: conversation, run: run, inflight: inflight, error: error)
             return
         }

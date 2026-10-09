@@ -20,6 +20,8 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `PiAgent` | Multi-step loop on the engine: one journaled model checkpoint, parallel safe tools, subagents, forks, compaction. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
+| `DurableObserve` | swift-log adapter for run, model, and effect spans. Attributes are scrubbed. |
+| `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -149,6 +151,14 @@ When the prompt grows past `compactAfterMessages`, the step journals `context.co
 
 `Retention.purge` rewrites expired payloads for the selected event types to `{"purged": true}` and appends `retention.purged`. Sequence numbers stay. A stream with `retention.hold` set is skipped.
 
+## Observability
+
+`Engine` accepts a `RunTracing` hook. Each `advance` opens a `run` span, each model plan opens `model.plan`, and each tool body opens `effect`. Attributes are conversation ids, step indexes, call ids, tool names, effect kinds, and status. `SpanScrub` drops keys such as `prompt`, `text`, `payload`, and `authorization`, and replaces secret-shaped values. `NoOpTracing` is the default. `LoggingTracer` in `DurableObserve` writes the same spans through swift-log.
+
+`EventHashChain` hashes each stored envelope with the previous digest (sequence, stream, type, schema, time, canonical payload). `durable-audit tip --database agent.sqlite` prints the tip. `verify --expect <tip>` exits non-zero when the tip differs or a sequence has a hole. Deleting the tail keeps the remaining sequences contiguous, so record the tip if you need to detect that. The chain covers the bytes in the file. An encrypted log is hashed as ciphertext.
+
+`durable-audit export --format jsonl` or `csv` lists `effect.intent`, `effect.result`, `approval.requested`, and `approval.resolved` with ids, tool name, outcome, and approver. Message text and tool arguments are not columns.
+
 ## DurableKit
 
 `ConversationModel` is a `@MainActor` class. When the Observation module is present it is also `@Observable`. It exposes `messages`, `status` (`idle`, `running`, `suspendedForApproval`, `failed`, `done`), `pendingApproval`, the `events` array, and `eventLog` (an `AsyncStream` of envelopes observed after the model is opened). `send` starts a model turn. `approve` and `reject` resume the pending token. `recoverOnLaunch` continues a running journal and reloads a suspended one. `close` drops the lease, which in-process tests need because the pid is still alive.
@@ -236,7 +246,7 @@ These follow the redesign notes, not a table-compatible port of Pi Durable:
 - The journal is the source of truth. There is no copy of Pi Durable’s eight tables, and no importer yet.
 - The fence is store-wide. One actor serializes runs. Per-conversation commit lines and group commit are later work.
 - Transactional tools do not run inside an open SQLite transaction callback. Their writes are returned to the engine and committed with the result, which is the atomic boundary.
-- Encryption, redaction, retention, and OpenTelemetry are not in this milestone.
+- Encryption, redaction, and retention wrap the log. Tracing is a hook, not an OpenTelemetry SDK export.
 - Transcript messages are a small versioned JSON shape owned here. They are not the Pi message schema.
 
 ## License

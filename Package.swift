@@ -20,10 +20,14 @@ let package = Package(
         .library(name: "PiAI", targets: ["PiAI"]),
         .library(name: "PiAgent", targets: ["PiAgent"]),
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
+        .library(name: "DurableObserve", targets: ["DurableObserve"]),
+        .executable(name: "durable-audit", targets: ["DurableAudit"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.12.3"..<"3.15.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.1"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     ],
     targets: [
         .target(
@@ -117,6 +121,41 @@ let package = Package(
         .testTarget(
             name: "DurableKitTests",
             dependencies: ["DurableCore", "DurableStore", "DurableKit"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableObserve",
+            dependencies: [
+                "DurableCore",
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .executableTarget(
+            name: "DurableAudit",
+            dependencies: [
+                "DurableCore",
+                "DurableStore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableObserveTests",
+            dependencies: ["DurableObserve", "DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableAuditTests",
+            dependencies: ["DurableAudit", "DurableCore", "DurableStore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
