@@ -26,6 +26,7 @@ public enum EventType {
     public static let subagentFinished = "subagent.finished"
     public static let retentionHold = "retention.hold"
     public static let retentionPurged = "retention.purged"
+    public static let approvalEscalated = "approval.escalated"
 
     public static let messageAppendedCurrentVersion = 2
 }
@@ -269,10 +270,32 @@ public struct NoOpTimerScheduling: TimerScheduling {
     public func schedule(name: String, fireAt: Date) async {}
 }
 
+public struct ApprovalSpec: Sendable, Equatable {
+    public var id: String
+    public var prompt: String
+    public var risk: ApprovalRisk
+    public var expiresAt: Date?
+    public var escalateTo: String?
+
+    public init(
+        id: String,
+        prompt: String,
+        risk: ApprovalRisk = .standard,
+        expiresAt: Date? = nil,
+        escalateTo: String? = nil
+    ) {
+        self.id = id
+        self.prompt = prompt
+        self.risk = risk
+        self.expiresAt = expiresAt
+        self.escalateTo = escalateTo
+    }
+}
+
 public enum ScriptedStep: Sendable, Equatable {
     case assistant(String)
     case tool(name: String, callID: String, arguments: JSONValue)
-    case approval(id: String, prompt: String)
+    case approval(ApprovalSpec)
     case finish(String)
     /// Suspend until `Engine.pumpTimers` (or recover) passes this instant.
     case sleepUntil(Date)
@@ -283,14 +306,35 @@ public enum ScriptedStep: Sendable, Equatable {
     /// Summarize history. The original messages stay in the log and drop out of the prompt.
     case compact(summary: String, throughMessageID: String)
 
+    public static func approval(
+        id: String,
+        prompt: String,
+        risk: ApprovalRisk = .standard,
+        expiresAt: Date? = nil,
+        escalateTo: String? = nil
+    ) -> ScriptedStep {
+        .approval(ApprovalSpec(
+            id: id,
+            prompt: prompt,
+            risk: risk,
+            expiresAt: expiresAt,
+            escalateTo: escalateTo
+        ))
+    }
+
     var canonical: String {
         switch self {
         case .assistant(let text):
             return "assistant:\(text)"
         case .tool(let name, let callID, let arguments):
             return "tool:\(name):\(callID):\(arguments.canonicalJSON())"
-        case .approval(let id, let prompt):
-            return "approval:\(id):\(prompt)"
+        case .approval(let spec):
+            var text = "approval:\(spec.id):\(spec.prompt)"
+            if spec.risk != .standard || spec.expiresAt != nil || spec.escalateTo != nil {
+                let expiry = spec.expiresAt?.timeIntervalSince1970 ?? 0
+                text += ":\(spec.risk.rawValue):\(expiry):\(spec.escalateTo ?? "")"
+            }
+            return text
         case .finish(let text):
             return "finish:\(text)"
         case .sleepUntil(let date):
@@ -315,12 +359,22 @@ public enum ScriptedStep: Sendable, Equatable {
                 "callID": .string(callID),
                 "arguments": arguments,
             ])
-        case .approval(let id, let prompt):
-            return .object([
+        case .approval(let spec):
+            var fields: [String: JSONValue] = [
                 "type": .string("approval"),
-                "id": .string(id),
-                "prompt": .string(prompt),
-            ])
+                "id": .string(spec.id),
+                "prompt": .string(spec.prompt),
+            ]
+            if spec.risk != .standard {
+                fields["risk"] = .string(spec.risk.rawValue)
+            }
+            if let expiresAt = spec.expiresAt {
+                fields["expiresAt"] = .double(expiresAt.timeIntervalSince1970)
+            }
+            if let escalateTo = spec.escalateTo {
+                fields["escalateTo"] = .string(escalateTo)
+            }
+            return .object(fields)
         case .finish(let text):
             return .object(["type": .string("finish"), "text": .string(text)])
         case .sleepUntil(let date):
@@ -362,7 +416,18 @@ public enum ScriptedStep: Sendable, Equatable {
             guard let id = fields["id"]?.stringValue, let prompt = fields["prompt"]?.stringValue else {
                 throw DurableError.invariant("approval step is missing fields")
             }
-            return .approval(id: id, prompt: prompt)
+            var expiresAt: Date?
+            if let raw = fields["expiresAt"] {
+                expiresAt = Date(timeIntervalSince1970: try JSONNumbers.double(raw))
+            }
+            let risk = fields["risk"]?.stringValue.flatMap(ApprovalRisk.init(rawValue:)) ?? .standard
+            return .approval(ApprovalSpec(
+                id: id,
+                prompt: prompt,
+                risk: risk,
+                expiresAt: expiresAt,
+                escalateTo: fields["escalateTo"]?.stringValue
+            ))
         case "finish":
             guard let text = fields["text"]?.stringValue else {
                 throw DurableError.invariant("finish step is missing text")

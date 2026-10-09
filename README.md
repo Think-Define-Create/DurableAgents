@@ -99,6 +99,12 @@ let done = try await restarted.resume(token: token, decision: .approved)
 
 Denied approvals fail the run. An external effect that reconciles as `.unknown` uses the same suspend path; resume it with `.approvedWithOutput` so a person supplies the result.
 
+`resume` records `approver` and `authLevel` on `approval.resolved`. A high-risk approval requires at least `devicePasscode`. `biometric` also satisfies that bar. `ApprovalChannel` is how a host is told: `LocalNotificationChannel` builds a notification draft, `PushApprovalChannel` builds an APNs `aps` alert, `WebhookApprovalChannel` posts either a Slack `{"text"}` body or a generic JSON body, and `WebApprovalChannel` keeps an in-app list. An optional webhook `Authorization` header is not written to the log.
+
+`.approval(..., expiresAt:escalateTo:)` suspends until the engine clock passes `expiresAt`. `pumpTimers` and `recover` then append `approval.escalated`. With `escalateTo`, a new approval is requested for that audience and does not expire again. Without it, the run fails with `approval expired`.
+
+Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) live in the sample app. They are Apple-only and were not compiled here. `ApprovalAppleSupport` reports those imports as unavailable on Linux.
+
 ## Inbox
 
 `submit` is exactly-once for a `requestID` inside one conversation. The payload hash is SHA-256 of the text and the script. The same id and the same hash returns the original submission. The same id and a different hash throws `DurableError.requestIDConflict`. A second id while a run is suspended is queued and starts after that run finishes.

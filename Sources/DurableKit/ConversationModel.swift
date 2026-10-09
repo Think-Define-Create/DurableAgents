@@ -17,11 +17,21 @@ public struct PendingApprovalInfo: Sendable, Equatable {
     public var approvalID: String
     public var prompt: String
     public var token: ResumeToken
+    public var risk: ApprovalRisk
+    public var requiredAuth: AuthenticationLevel
 
-    public init(approvalID: String, prompt: String, token: ResumeToken) {
+    public init(
+        approvalID: String,
+        prompt: String,
+        token: ResumeToken,
+        risk: ApprovalRisk = .standard,
+        requiredAuth: AuthenticationLevel = .session
+    ) {
         self.approvalID = approvalID
         self.prompt = prompt
         self.token = token
+        self.risk = risk
+        self.requiredAuth = requiredAuth
     }
 }
 
@@ -49,9 +59,10 @@ public final class ConversationModel {
         tools: [Tool],
         model: any ModelStep,
         backendLabel: String,
-        conversationID: ConversationID? = nil
+        conversationID: ConversationID? = nil,
+        approvals: any ApprovalChannel = NoOpApprovalChannel()
     ) async throws -> ConversationModel {
-        let engine = try await Engine(store: store, tools: tools, model: model)
+        let engine = try await Engine(store: store, tools: tools, model: model, approvals: approvals)
         let model = ConversationModel(
             engine: engine,
             backendLabel: backendLabel,
@@ -103,21 +114,24 @@ public final class ConversationModel {
         }
     }
 
-    public func approve() async throws {
+    public func approve(as approver: Approver = Approver(id: "local", authLevel: .session)) async throws {
         guard let pending = pendingApproval else {
             throw DurableError.notSuspended
         }
         try await perform {
-            _ = try await engine.resume(token: pending.token, decision: .approved)
+            _ = try await engine.resume(token: pending.token, decision: .approved, approver: approver)
         }
     }
 
-    public func reject(_ reason: String = "denied") async throws {
+    public func reject(
+        _ reason: String = "denied",
+        as approver: Approver = Approver(id: "local", authLevel: .session)
+    ) async throws {
         guard let pending = pendingApproval else {
             throw DurableError.notSuspended
         }
         try await perform {
-            _ = try await engine.resume(token: pending.token, decision: .denied(reason))
+            _ = try await engine.resume(token: pending.token, decision: .denied(reason), approver: approver)
         }
     }
 
@@ -179,9 +193,19 @@ public final class ConversationModel {
         guard snapshot.run?.status == .suspended, let token = snapshot.run?.resumeToken else {
             return nil
         }
-        let prompt = events.last { event in
+        let requested = events.last { event in
             event.type == EventType.approvalRequested && event.payload["token"]?.stringValue == token.raw
-        }?.payload["prompt"]?.stringValue ?? ""
-        return PendingApprovalInfo(approvalID: token.approvalID, prompt: prompt, token: token)
+        }
+        let prompt = requested?.payload["prompt"]?.stringValue ?? ""
+        let risk = requested?.payload["risk"]?.stringValue.flatMap(ApprovalRisk.init(rawValue:)) ?? .standard
+        let required = requested?.payload["requiredAuth"]?.stringValue.flatMap(AuthenticationLevel.init(rawValue:))
+            ?? .session
+        return PendingApprovalInfo(
+            approvalID: token.approvalID,
+            prompt: prompt,
+            token: token,
+            risk: risk,
+            requiredAuth: required
+        )
     }
 }

@@ -16,6 +16,7 @@ public actor Engine {
     private let jitter: any JitterSource
     private let backgroundWake: any BackgroundWakeScheduling
     private let tracing: any RunTracing
+    private let approvals: any ApprovalChannel
     private let owner: UUID
     private var fence: FenceToken
     private let storeIdentifier: String
@@ -34,6 +35,7 @@ public actor Engine {
         jitter: any JitterSource = ZeroJitter(),
         backgroundWake: any BackgroundWakeScheduling = NoOpBackgroundWake(),
         tracing: any RunTracing = NoOpTracing(),
+        approvals: any ApprovalChannel = NoOpApprovalChannel(),
         leaseTTL: Duration = .seconds(30),
         owner: UUID = UUID()
     ) async throws {
@@ -62,6 +64,7 @@ public actor Engine {
         self.jitter = jitter
         self.backgroundWake = backgroundWake
         self.tracing = ScrubbingTracer(inner: tracing)
+        self.approvals = approvals
         self.owner = owner
         self.fence = lease.fence
         self.storeIdentifier = try await store.storeID()
@@ -169,7 +172,11 @@ public actor Engine {
         }
     }
 
-    public func resume(token: ResumeToken, decision: ApprovalDecision) async throws -> ResumeResult {
+    public func resume(
+        token: ResumeToken,
+        decision: ApprovalDecision,
+        approver: Approver = Approver(id: "local", authLevel: .session)
+    ) async throws -> ResumeResult {
         try await exclusively {
             try ensureWritable()
             let projection = try await load()
@@ -183,7 +190,19 @@ public actor Engine {
             guard run.status == .suspended else {
                 throw DurableError.notSuspended
             }
-            try await resolveApproval(conversation: conversation, run: run, pending: pending, decision: decision)
+            if approver.authLevel < pending.requiredAuth {
+                throw DurableError.approvalAuthTooWeak(
+                    required: pending.requiredAuth.rawValue,
+                    actual: approver.authLevel.rawValue
+                )
+            }
+            try await resolveApproval(
+                conversation: conversation,
+                run: run,
+                pending: pending,
+                decision: decision,
+                approver: approver
+            )
             let settled = try await advance(token.conversationID)
             guard let status = settled.runStatus else {
                 throw DurableError.invariant("resume did not leave a run status")
@@ -301,7 +320,11 @@ public actor Engine {
                 continue
             }
             if run.status == .suspended {
-                actions.append(Self.recovery(conversation, run))
+                let settled = try await advance(conversation.id)
+                let again = try await load()
+                if let updated = again.conversations[key], let latest = updated.activeRun ?? updated.latestRun {
+                    actions.append(Self.recovery(updated, latest, override: settled))
+                }
                 continue
             }
             let settled = try await advance(conversation.id)
@@ -346,6 +369,12 @@ public actor Engine {
                        let payload = projection.pendingSignals[wait.name]
                     {
                         try await resolveWait(conversation, run: run, payload: payload)
+                        continue
+                    }
+                    if let pending = run.pending, pending.purpose == .human,
+                       let expiresAt = pending.expiresAt, clock.now() >= expiresAt
+                    {
+                        try await expireApproval(conversation: conversation, run: run, pending: pending)
                         continue
                     }
                     return Self.view(of: conversation)
@@ -667,25 +696,39 @@ public actor Engine {
                     ),
                 ])
             }
-        case .approval(let approvalID, let prompt):
-            if approvalID.isEmpty {
+        case .approval(let spec):
+            if spec.id.isEmpty {
                 throw DurableError.invariant("approval id is empty")
             }
-            let token = ResumeToken(conversationID: conversation.id, approvalID: approvalID)
+            let token = ResumeToken(conversationID: conversation.id, approvalID: spec.id)
+            let required = spec.risk == .high ? AuthenticationLevel.devicePasscode : AuthenticationLevel.session
             _ = try await commit(.conversation(conversation.id), [
-                Self.messageDraft(role: "system", text: prompt, messageID: Self.freshMessageID()),
-                EventDraft(
-                    type: EventType.approvalRequested,
-                    payload: .object([
-                        "runID": .string(run.id.raw),
-                        "stepIndex": .int(Int64(index)),
-                        "approvalID": .string(approvalID),
-                        "prompt": .string(prompt),
-                        "purpose": .string(ApprovalPurpose.human.rawValue),
-                        "token": .string(token.raw),
-                    ])
+                Self.messageDraft(role: "system", text: spec.prompt, messageID: Self.freshMessageID()),
+                Self.approvalRequestedDraft(
+                    run: run,
+                    index: index,
+                    approvalID: spec.id,
+                    prompt: spec.prompt,
+                    purpose: .human,
+                    token: token,
+                    risk: spec.risk,
+                    requiredAuth: required,
+                    expiresAt: spec.expiresAt,
+                    escalateTo: spec.escalateTo,
+                    audience: nil
                 ),
             ])
+            await approvals.deliver(Self.notice(
+                conversation: conversation,
+                run: run,
+                approvalID: spec.id,
+                prompt: spec.prompt,
+                risk: spec.risk,
+                purpose: ApprovalPurpose.human.rawValue,
+                token: token,
+                expiresAt: spec.expiresAt,
+                audience: spec.escalateTo
+            ))
         case .tool(let name, let callRaw, let arguments):
             if callRaw.isEmpty {
                 throw DurableError.invariant("tool call id is empty")
@@ -883,19 +926,32 @@ public actor Engine {
         conversation: FoldedConversation,
         run: FoldedRun,
         pending: PendingApproval,
-        decision: ApprovalDecision
+        decision: ApprovalDecision,
+        approver: Approver
     ) async throws {
         switch pending.purpose {
         case .human:
             switch decision {
             case .approved, .approvedWithOutput:
                 _ = try await commit(.conversation(conversation.id), [
-                    Self.approvalResolvedDraft(run: run, approvalID: pending.approvalID, approved: true, reason: nil),
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: true,
+                        reason: nil,
+                        approver: approver
+                    ),
                     Self.stepDraft(run: run, index: pending.stepIndex),
                 ])
             case .denied(let reason):
                 _ = try await commit(.conversation(conversation.id), [
-                    Self.approvalResolvedDraft(run: run, approvalID: pending.approvalID, approved: false, reason: reason),
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: false,
+                        reason: reason,
+                        approver: approver
+                    ),
                     EventDraft(
                         type: EventType.runFailed,
                         payload: .object([
@@ -912,7 +968,13 @@ public actor Engine {
             switch decision {
             case .approvedWithOutput(let output):
                 var drafts = [
-                    Self.approvalResolvedDraft(run: run, approvalID: pending.approvalID, approved: true, reason: nil),
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: true,
+                        reason: nil,
+                        approver: approver
+                    ),
                 ]
                 let completesStep = !Self.providerTurnIsOpen(run)
             drafts.append(contentsOf: Self.successDrafts(
@@ -929,7 +991,13 @@ public actor Engine {
                 throw DurableError.approvalNeedsOutput
             case .denied(let reason):
                 _ = try await commit(.conversation(conversation.id), [
-                    Self.approvalResolvedDraft(run: run, approvalID: pending.approvalID, approved: false, reason: reason),
+                    Self.approvalResolvedDraft(
+                        run: run,
+                        approvalID: pending.approvalID,
+                        approved: false,
+                        reason: reason,
+                        approver: approver
+                    ),
                     Self.resultDraft(
                         run: run,
                         inflight: inflight,
@@ -1651,11 +1719,136 @@ public actor Engine {
         return false
     }
 
+    private func expireApproval(
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        pending: PendingApproval
+    ) async throws {
+        if let audience = pending.escalateTo, pending.audience == nil {
+            let approvalID = pending.approvalID + ":escalated"
+            let token = ResumeToken(conversationID: conversation.id, approvalID: approvalID)
+            _ = try await commit(.conversation(conversation.id), [
+                EventDraft(
+                    type: EventType.approvalEscalated,
+                    payload: .object([
+                        "runID": .string(run.id.raw),
+                        "approvalID": .string(pending.approvalID),
+                        "audience": .string(audience),
+                        "at": .double(clock.now().timeIntervalSince1970),
+                    ])
+                ),
+                Self.approvalRequestedDraft(
+                    run: run,
+                    index: pending.stepIndex,
+                    approvalID: approvalID,
+                    prompt: pending.prompt,
+                    purpose: .human,
+                    token: token,
+                    risk: pending.risk,
+                    requiredAuth: pending.requiredAuth,
+                    expiresAt: nil,
+                    escalateTo: nil,
+                    audience: audience
+                ),
+            ])
+            await approvals.deliver(Self.notice(
+                conversation: conversation,
+                run: run,
+                approvalID: approvalID,
+                prompt: pending.prompt,
+                risk: pending.risk,
+                purpose: ApprovalPurpose.human.rawValue,
+                token: token,
+                expiresAt: nil,
+                audience: audience
+            ))
+            return
+        }
+        _ = try await commit(.conversation(conversation.id), [
+            EventDraft(
+                type: EventType.approvalEscalated,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "approvalID": .string(pending.approvalID),
+                    "expired": .bool(true),
+                    "at": .double(clock.now().timeIntervalSince1970),
+                ])
+            ),
+            EventDraft(
+                type: EventType.runFailed,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "reason": .string("approval expired"),
+                ])
+            ),
+        ])
+    }
+
+    private static func notice(
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        approvalID: String,
+        prompt: String,
+        risk: ApprovalRisk,
+        purpose: String,
+        token: ResumeToken,
+        expiresAt: Date?,
+        audience: String?
+    ) -> ApprovalNotice {
+        ApprovalNotice(
+            conversationID: conversation.id.raw,
+            runID: run.id.raw,
+            approvalID: approvalID,
+            prompt: prompt,
+            risk: risk,
+            purpose: purpose,
+            token: token.raw,
+            expiresAt: expiresAt,
+            audience: audience
+        )
+    }
+
+    private static func approvalRequestedDraft(
+        run: FoldedRun,
+        index: Int,
+        approvalID: String,
+        prompt: String,
+        purpose: ApprovalPurpose,
+        token: ResumeToken,
+        risk: ApprovalRisk,
+        requiredAuth: AuthenticationLevel,
+        expiresAt: Date?,
+        escalateTo: String?,
+        audience: String?
+    ) -> EventDraft {
+        var payload: [String: JSONValue] = [
+            "runID": .string(run.id.raw),
+            "stepIndex": .int(Int64(index)),
+            "approvalID": .string(approvalID),
+            "prompt": .string(prompt),
+            "purpose": .string(purpose.rawValue),
+            "token": .string(token.raw),
+            "risk": .string(risk.rawValue),
+            "requiredAuth": .string(requiredAuth.rawValue),
+        ]
+        if let expiresAt {
+            payload["expiresAt"] = .double(expiresAt.timeIntervalSince1970)
+        }
+        if let escalateTo {
+            payload["escalateTo"] = .string(escalateTo)
+        }
+        if let audience {
+            payload["audience"] = .string(audience)
+        }
+        return EventDraft(type: EventType.approvalRequested, payload: .object(payload))
+    }
+
     private static func approvalResolvedDraft(
         run: FoldedRun,
         approvalID: String,
         approved: Bool,
-        reason: String?
+        reason: String?,
+        approver: Approver
     ) -> EventDraft {
         EventDraft(
             type: EventType.approvalResolved,
@@ -1664,6 +1857,8 @@ public actor Engine {
                 "approvalID": .string(approvalID),
                 "approved": .bool(approved),
                 "reason": reason.map(JSONValue.string) ?? .null,
+                "approver": .string(approver.id),
+                "authLevel": .string(approver.authLevel.rawValue),
             ])
         )
     }

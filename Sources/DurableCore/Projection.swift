@@ -38,6 +38,11 @@ struct PendingApproval: Equatable {
     var purpose: ApprovalPurpose
     var token: ResumeToken
     var stepIndex: Int
+    var risk: ApprovalRisk = .standard
+    var requiredAuth: AuthenticationLevel = .anonymous
+    var expiresAt: Date?
+    var escalateTo: String?
+    var audience: String?
 }
 
 struct FoldedSubmission {
@@ -340,13 +345,25 @@ struct Projection {
             else {
                 throw DurableError.invariant("approval.requested is missing fields at seq \(event.globalSeq)")
             }
+            let risk = event.payload["risk"]?.stringValue.flatMap(ApprovalRisk.init(rawValue:)) ?? .standard
+            let required = event.payload["requiredAuth"]?.stringValue.flatMap(AuthenticationLevel.init(rawValue:))
+                ?? .anonymous
+            var expiresAt: Date?
+            if let raw = event.payload["expiresAt"], let seconds = try? JSONNumbers.double(raw) {
+                expiresAt = Date(timeIntervalSince1970: seconds)
+            }
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
                 run.pending = PendingApproval(
                     approvalID: approvalID,
                     prompt: prompt,
                     purpose: purpose,
                     token: token,
-                    stepIndex: Int(stepIndex)
+                    stepIndex: Int(stepIndex),
+                    risk: risk,
+                    requiredAuth: required,
+                    expiresAt: expiresAt,
+                    escalateTo: event.payload["escalateTo"]?.stringValue,
+                    audience: event.payload["audience"]?.stringValue
                 )
                 run.status = .suspended
             }
@@ -403,7 +420,7 @@ struct Projection {
                 record.finalText = event.payload["finalText"]?.stringValue
                 run.subagents[callID] = record
             }
-        case EventType.retentionHold, EventType.retentionPurged:
+        case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated:
             return
         case EventType.runFailed:
             let reason = event.payload["reason"]?.stringValue ?? "failed"

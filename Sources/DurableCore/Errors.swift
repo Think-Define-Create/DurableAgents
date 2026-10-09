@@ -10,6 +10,7 @@ public enum DurableError: Error, Sendable, Equatable, CustomStringConvertible {
     case invalidResumeToken
     case notSuspended
     case approvalNeedsOutput
+    case approvalAuthTooWeak(required: String, actual: String)
     case incompatibleSchema(found: Int)
     case unsupportedEventVersion(type: String, version: Int, supported: Int)
     case poisoned
@@ -36,6 +37,8 @@ public enum DurableError: Error, Sendable, Equatable, CustomStringConvertible {
             return "conversation is not waiting for approval"
         case .approvalNeedsOutput:
             return "resolving an unknown external effect requires approvedWithOutput"
+        case .approvalAuthTooWeak(let required, let actual):
+            return "approval requires \(required) authentication, got \(actual)"
         case .incompatibleSchema(let found):
             return "unsupported store schema version \(found)"
         case .unsupportedEventVersion(let type, let version, let supported):

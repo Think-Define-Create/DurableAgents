@@ -34,7 +34,7 @@ public struct EscrowScriptedModel: ModelStep {
 
         if wantsClosing(lower) {
             if !context.grantedApprovalIDs.contains(Self.closingApprovalID) {
-                return .approval(id: Self.closingApprovalID, prompt: Self.closingPrompt)
+                return .approval(id: Self.closingApprovalID, prompt: Self.closingPrompt, risk: .high)
             }
             if !toolsDone.contains("scheduleClosing") {
                 return .tool(

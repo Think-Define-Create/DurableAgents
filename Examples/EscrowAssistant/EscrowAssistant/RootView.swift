@@ -92,7 +92,11 @@ private struct ChatScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(pending.prompt)
                 .font(.subheadline.weight(.semibold))
-            Text("The run is suspended until you approve or reject. A notification has the same actions.")
+            Text(
+                pending.risk == .high
+                    ? "This is high-risk. Face ID or a device passcode is required. A notification has the same actions."
+                    : "The run is suspended until you approve or reject. A notification has the same actions."
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {

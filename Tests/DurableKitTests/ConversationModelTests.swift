@@ -202,7 +202,11 @@ private actor KitOnce {
     try await model.send("Schedule Friday's closing")
     #expect(model.status == .suspendedForApproval)
     #expect(model.pendingApproval?.approvalID == EscrowScriptedModel.closingApprovalID)
-    try await model.approve()
+    #expect(model.pendingApproval?.risk == .high)
+    await #expect(throws: DurableError.self) {
+        try await model.approve()
+    }
+    try await model.approve(as: Approver(id: "tester", authLevel: .biometric))
     #expect(model.status == .done)
     #expect(model.messages.contains { $0.role == "assistant" && $0.text.contains("14 Harbor Lane") })
     await model.close()

@@ -99,9 +99,28 @@ final class AppModel {
 
     func approve() async {
         do {
-            try await conversation.approve()
+            guard let pending = conversation.pendingApproval else { return }
+            if pending.risk == .high {
+                #if canImport(LocalAuthentication)
+                guard let level = await EscrowBiometricGate.evaluate(reason: pending.prompt) else {
+                    errorMessage = "Face ID or a device passcode is required for this approval."
+                    return
+                }
+                guard level >= pending.requiredAuth else {
+                    errorMessage = "This approval needs \(pending.requiredAuth.rawValue) authentication."
+                    return
+                }
+                try await conversation.approve(as: Approver(id: "device-owner", authLevel: level))
+                #else
+                errorMessage = "This build cannot confirm a high-risk approval."
+                return
+                #endif
+            } else {
+                try await conversation.approve(as: Approver(id: "app-user", authLevel: .session))
+            }
             errorMessage = nil
             await postApprovalIfNeeded()
+            await syncLiveActivity()
         } catch {
             errorMessage = String(describing: error)
         }
@@ -178,14 +197,39 @@ final class AppModel {
         guard let pending = conversation.pendingApproval else { return }
         if postedApprovalToken == pending.token.raw { return }
         postedApprovalToken = pending.token.raw
+        let notice = ApprovalNotice(
+            conversationID: "",
+            runID: "",
+            approvalID: pending.approvalID,
+            prompt: pending.prompt,
+            risk: pending.risk,
+            purpose: "human",
+            token: pending.token.raw,
+            expiresAt: nil,
+            audience: nil
+        )
+        let draft = LocalNotificationDraft.make(notice)
         let content = UNMutableNotificationContent()
-        content.title = "Escrow approval"
-        content.body = pending.prompt
+        content.title = draft.title
+        content.body = draft.body
         content.sound = .default
         content.categoryIdentifier = Self.approvalCategory
         content.userInfo = ["token": pending.token.raw]
+        await syncLiveActivity()
         let request = UNNotificationRequest(identifier: pending.token.raw, content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
+    }
+
+    private func syncLiveActivity() async {
+        if #available(iOS 16.2, *) {
+            if let pending = conversation.pendingApproval {
+                EscrowLiveActivity.showPending(prompt: pending.prompt)
+            } else if conversation.status == .running {
+                EscrowLiveActivity.showProgress("Working")
+            } else {
+                EscrowLiveActivity.end(detail: conversation.status == .failed ? "Failed" : "Done")
+            }
+        }
     }
 
     private static func makeBackend() -> (model: any ModelStep, label: String) {
