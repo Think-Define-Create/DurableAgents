@@ -186,6 +186,91 @@ import Darwin
     #expect(live == turn.text)
 }
 
+@Test func liveTextShowsOnlyTheCurrentTurn() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let session = try await AgentSession.open(
+        store: InMemoryEventStore(storeID: "agent-" + UUID().uuidString),
+        directoryURL: directory
+    )
+    let agent = try await session.create(title: "Desk")
+    _ = try await session.send(agent.id, text: "first")
+    let live = await session.liveTranscript()
+    #expect(await live.latest().contains("first"))
+    _ = try await session.send(agent.id, text: "second")
+    let text = await live.latest()
+    #expect(text.contains("second"))
+    #expect(!text.contains("first"))
+}
+
+@Test func overviewMatchesTheSeparateReads() async throws {
+    let harness = try await Harness.open(model: ScriptedModelStep(steps: [.approval(id: "pay", prompt: "Pay?")]))
+    let session = harness.session
+    let agent = try await session.create(title: "Desk")
+    let idle = try await session.create(title: "Idle")
+    _ = try await session.send(agent.id, text: "Hello")
+    let overview = try await session.overview(for: agent.id)
+    #expect(overview.messages == (try await session.transcript(for: agent.id)))
+    #expect(overview.events == (try await session.events(for: agent.id)))
+    #expect(overview.usage == (try await session.usage(for: agent.id)))
+    #expect(overview.inbox == (try await session.inbox()))
+    #expect(overview.inbox.count == 1)
+    #expect(overview.runningAgents == 1)
+    let empty = try await session.overview(for: idle.id)
+    #expect(empty.messages.isEmpty)
+    #expect(empty.usage == (try await session.usage(for: idle.id)))
+}
+
+@Test func approvedDemoReminderFinishesTheRun() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let store = InMemoryEventStore(storeID: "agent-" + UUID().uuidString)
+    let session = try await AgentSession.open(store: store, directoryURL: directory)
+    let agent = try await session.create(title: "Pay")
+    _ = try await session.send(agent.id, text: "remind me to approve the wire")
+    let item = try #require(try await session.inbox().first)
+    let resumed = try await withThrowingTaskGroup(of: ResumeResult?.self) { group in
+        group.addTask {
+            try await session.decide(token: item.token, approved: true, approver: Approver(id: "local", authLevel: .session))
+        }
+        group.addTask {
+            try await Task.sleep(for: .seconds(5))
+            return nil
+        }
+        let first = try await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+    let events = try await session.events(for: agent.id)
+    let planned = events.filter { $0.type == EventType.stepPlanned }.count
+    #expect(resumed != nil, "decide did not return within 5s; \(planned) steps planned")
+    #expect(planned <= 3)
+    #expect(events.last?.type == EventType.runCompleted)
+}
+
+@Test func routingStopsARunAtTheStepCap() async throws {
+    let builds = ProviderBuildCounter()
+    let step = RoutingModelStep(
+        table: ProviderTable(),
+        policy: PolicyBox(onDeviceOnly: false),
+        secrets: MemorySecretStore(),
+        transcript: LiveTranscript(),
+        builds: builds
+    )
+    let planned = try await step.plan(context: ModelContext(
+        conversationID: ConversationID(raw: "loop"),
+        messages: [TranscriptMessage(messageID: "m", role: "user", text: "remind me")],
+        completedTools: [],
+        grantedApprovalIDs: [],
+        tools: [],
+        completedSteps: RoutingModelStep.maxStepsPerRun
+    ))
+    guard case .finish(let text) = planned else {
+        Issue.record("expected a finish at the step cap")
+        return
+    }
+    #expect(text.contains("Stopped after"))
+    #expect(builds.count == 0)
+}
+
 @Test func onDeviceOnlyDoesNotBuildACloudProvider() async throws {
     let table = ProviderTable()
     let policy = PolicyBox(onDeviceOnly: true)
