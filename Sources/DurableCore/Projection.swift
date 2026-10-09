@@ -420,7 +420,7 @@ struct Projection {
                 record.finalText = event.payload["finalText"]?.stringValue
                 run.subagents[callID] = record
             }
-        case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated:
+        case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated, EventType.importNote:
             return
         case EventType.runFailed:
             let reason = event.payload["reason"]?.stringValue ?? "failed"

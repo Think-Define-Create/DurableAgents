@@ -22,6 +22,8 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
 | `DurableObserve` | swift-log adapter for run, model, and effect spans. Attributes are scrubbed. |
 | `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
+| `PiDurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
+| `pi-durable-import` | CLI for that importer. |
 | `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
 
 Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
@@ -165,6 +167,16 @@ When the prompt grows past `compactAfterMessages`, the step journals `context.co
 
 `durable-audit export --format jsonl` or `csv` lists `effect.intent`, `effect.result`, `approval.requested`, and `approval.resolved` with ids, tool name, outcome, and approver. Message text and tool arguments are not columns.
 
+## Importing a pi-durable database
+
+`pi-durable-import` reads schema version 1 from `@earendil-works/pi-durable` (`packages/durable/src/storage/sqlite/migrations.ts` on the main branch of earendil-works/pi). The eight domain tables are `durable_metadata`, `record_ids`, `conversations`, `entries`, `tasks`, `submissions`, `documents`, and `document_revisions`. `durable_schema` is the version row.
+
+```bash
+swift run pi-durable-import --source session.sqlite --destination events.sqlite
+```
+
+User, assistant, and tool-result entries become `message.appended`. Compaction becomes `context.compacted`. Tool calls, tasks, submissions, and document bases become `import.note`. The command prints a loss report. It does not copy the id allocator, fork history by pointer, Chord deltas, images, thinking blocks, live task checkpoints, or memos. A live task is not resumed. A newer schema version is refused. Tool calls are not `effect.intent` rows, so opening the log does not rerun them.
+
 ## DurableKit
 
 `ConversationModel` is a `@MainActor` class. When the Observation module is present it is also `@Observable`. It exposes `messages`, `status` (`idle`, `running`, `suspendedForApproval`, `failed`, `done`), `pendingApproval`, the `events` array, and `eventLog` (an `AsyncStream` of envelopes observed after the model is opened). `send` starts a model turn. `approve` and `reject` resume the pending token. `recoverOnLaunch` continues a running journal and reloads a suspended one. `close` drops the lease, which in-process tests need because the pid is still alive.
@@ -181,7 +193,9 @@ The app stores `escrow.sqlite` in Application Support (`EscrowAssistant/`). The 
 - **Send the buyer an email.** External tool `sendEmail`. The body writes a fake outbox file, then returns. Recovery calls `reconcile` and does not write a second receipt when the outbox already has that effect key.
 - **Schedule Friday's closing.** The run suspends for approval (`closing`). Approve or reject from the in-app banner or from the notification actions. After approval, idempotent `scheduleClosing` writes a fake calendar entry.
 
-The status line shows whether the turn is using the on-device model or the scripted fallback. The Event log screen lists the journal as it grows.
+The status line shows the planner. The provider menu chooses Apple on-device, Anthropic, OpenAI, or the scripted planner. Anthropic and OpenAI go through `PiAgent` and `PiAI`. The key is a Keychain account (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), not a value in the log. Apple on-device uses `PiAgentStep` with `FoundationModelsProvider` when that framework is available. The scripted planner is the default, and `-UseScriptedModel` forces it. `scheduleClosing` waits for a high-risk approval before the tool runs.
+
+The journal file is encrypted at rest with `EncryptingEventStore` and `BuiltInRedactor`. On Apple the data key is in the Keychain. The Event log screen lists the journal as the app sees it, which is plaintext after the wrapper decrypts.
 
 ### Crash demo
 
@@ -207,6 +221,13 @@ To run the package suite in Xcode, open `Package.swift`, wait for package resolu
 Formatting is [swift-format](https://github.com/swiftlang/swift-format) with the `.swift-format` file in the repo root. SwiftLint is not used. No GitHub Actions workflow is required to build or test.
 
 On Linux, install `libsqlite3-dev`, a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
+
+```bash
+swift run durable-audit tip --database events.sqlite
+swift run durable-audit verify --database events.sqlite --expect <tip>
+swift run durable-audit export --database events.sqlite --format jsonl
+swift run pi-durable-import --source session.sqlite --destination events.sqlite
+```
 
 ## Short example
 
@@ -249,7 +270,7 @@ SQLite is `try SQLiteEventStore(path: "agent.sqlite")`. The same `Engine` API ta
 
 These follow the redesign notes, not a table-compatible port of Pi Durable:
 
-- The journal is the source of truth. There is no copy of Pi Durable’s eight tables, and no importer yet.
+- The journal is the source of truth. `pi-durable-import` copies a pi-durable SQLite file in one direction and reports what it drops. The tables are not the runtime format.
 - The fence is store-wide. One actor serializes runs. Per-conversation commit lines and group commit are later work.
 - Transactional tools do not run inside an open SQLite transaction callback. Their writes are returned to the engine and committed with the result, which is the atomic boundary.
 - Encryption, redaction, and retention wrap the log. Tracing is a hook, not an OpenTelemetry SDK export.

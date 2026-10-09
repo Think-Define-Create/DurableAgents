@@ -22,6 +22,8 @@ let package = Package(
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
+        .library(name: "PiDurableImport", targets: ["PiDurableImport"]),
+        .executable(name: "pi-durable-import", targets: ["PiDurableImportCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
@@ -149,6 +151,36 @@ let package = Package(
         .testTarget(
             name: "DurableObserveTests",
             dependencies: ["DurableObserve", "DurableCore"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PiDurableImport",
+            dependencies: [
+                "DurableCore",
+                "DurableStore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .executableTarget(
+            name: "PiDurableImportCLI",
+            dependencies: [
+                "PiDurableImport",
+                "DurableCore",
+                "DurableStore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "PiDurableImportTests",
+            dependencies: ["PiDurableImport", "DurableCore", "DurableStore", "PiDurableImportCLI"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

@@ -93,9 +93,14 @@ public struct PiAgentStep: ModelStep {
     }
 
     private func request(for context: ModelContext, tools: [ModelToolDefinition]) -> ModelRequest {
-        ModelRequest(
+        var guidance = instructions
+        if !context.grantedApprovalIDs.isEmpty {
+            let ids = context.grantedApprovalIDs.joined(separator: ", ")
+            guidance += "\nApproved ids in this turn: \(ids). Call the matching tool."
+        }
+        return ModelRequest(
             model: modelName,
-            instructions: instructions,
+            instructions: guidance,
             messages: Self.modelMessages(context),
             tools: tools,
             maxOutputTokens: maxOutputTokens

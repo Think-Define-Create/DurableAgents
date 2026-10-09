@@ -62,6 +62,15 @@ private struct ChatScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Menu(app.provider.title) {
+                ForEach(EscrowProvider.allCases) { provider in
+                    Button(provider.title) {
+                        Task { await app.select(provider) }
+                    }
+                }
+            }
+            .font(.caption)
+            .accessibilityIdentifier("providerPicker")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)

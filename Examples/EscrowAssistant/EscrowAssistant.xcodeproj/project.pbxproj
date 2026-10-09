@@ -11,6 +11,9 @@
 		E5C0A1000000000000000017 /* DurableStore in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000013 /* DurableStore */; };
 		E5C0A1000000000000000018 /* DurableKit in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000014 /* DurableKit */; };
 		E5C0A1000000000000000019 /* DurableFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000015 /* DurableFoundationModels */; };
+		E5C0A1000000000000000030 /* PiAI in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000033 /* PiAI */; };
+		E5C0A1000000000000000031 /* PiAgent in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000034 /* PiAgent */; };
+		E5C0A1000000000000000032 /* DurableSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = E5C0A1000000000000000035 /* DurableSecurity */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,6 +45,9 @@
 				E5C0A1000000000000000017 /* DurableStore in Frameworks */,
 				E5C0A1000000000000000018 /* DurableKit in Frameworks */,
 				E5C0A1000000000000000019 /* DurableFoundationModels in Frameworks */,
+				E5C0A1000000000000000030 /* PiAI in Frameworks */,
+				E5C0A1000000000000000031 /* PiAgent in Frameworks */,
+				E5C0A1000000000000000032 /* DurableSecurity in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,6 +103,9 @@
 				E5C0A1000000000000000013 /* DurableStore */,
 				E5C0A1000000000000000014 /* DurableKit */,
 				E5C0A1000000000000000015 /* DurableFoundationModels */,
+				E5C0A1000000000000000033 /* PiAI */,
+				E5C0A1000000000000000034 /* PiAgent */,
+				E5C0A1000000000000000035 /* DurableSecurity */,
 			);
 			productName = EscrowAssistant;
 			productReference = E5C0A1000000000000000004 /* EscrowAssistant.app */;
@@ -382,6 +391,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = E5C0A1000000000000000011 /* XCLocalSwiftPackageReference "../.." */;
 			productName = DurableFoundationModels;
+		};
+		E5C0A1000000000000000033 /* PiAI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E5C0A1000000000000000011 /* XCLocalSwiftPackageReference "../.." */;
+			productName = PiAI;
+		};
+		E5C0A1000000000000000034 /* PiAgent */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E5C0A1000000000000000011 /* XCLocalSwiftPackageReference "../.." */;
+			productName = PiAgent;
+		};
+		E5C0A1000000000000000035 /* DurableSecurity */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E5C0A1000000000000000011 /* XCLocalSwiftPackageReference "../.." */;
+			productName = DurableSecurity;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

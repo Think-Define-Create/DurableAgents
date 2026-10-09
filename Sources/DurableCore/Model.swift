@@ -27,6 +27,7 @@ public enum EventType {
     public static let retentionHold = "retention.hold"
     public static let retentionPurged = "retention.purged"
     public static let approvalEscalated = "approval.escalated"
+    public static let importNote = "import.note"
 
     public static let messageAppendedCurrentVersion = 2
 }

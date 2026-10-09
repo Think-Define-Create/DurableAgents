@@ -1,10 +1,31 @@
 import DurableCore
 import DurableFoundationModels
 import DurableKit
+import DurableSecurity
 import DurableStore
 import Foundation
 import Observation
+import PiAgent
+import PiAI
 import UserNotifications
+
+enum EscrowProvider: String, CaseIterable, Identifiable {
+    case apple
+    case anthropic
+    case openai
+    case scripted
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .apple: "Apple on-device"
+        case .anthropic: "Anthropic"
+        case .openai: "OpenAI"
+        case .scripted: "Scripted"
+        }
+    }
+}
 
 @MainActor
 enum AppRuntime {
@@ -34,16 +55,21 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
 @Observable
 @MainActor
 final class AppModel {
-    let conversation: ConversationModel
+    var conversation: ConversationModel
     let world: EscrowWorld
+    var provider: EscrowProvider
     var errorMessage: String?
+    private let store: any EventStore
     private let router = NotificationRouter()
     private var postedApprovalToken: String?
     private static let approvalCategory = "escrow.approval"
+    private static let providerKey = "escrow.provider"
 
-    init(world: EscrowWorld, conversation: ConversationModel) {
+    init(world: EscrowWorld, conversation: ConversationModel, store: any EventStore, provider: EscrowProvider) {
         self.world = world
         self.conversation = conversation
+        self.store = store
+        self.provider = provider
     }
 
     static func launch() async throws -> AppModel {
@@ -55,19 +81,41 @@ final class AppModel {
             }
         }
         let database = directory.appendingPathComponent("escrow.sqlite").path
-        let store = try SQLiteEventStore(path: database)
+        let sqlite = try SQLiteEventStore(path: database)
+        let keys = try makeKeys(directory: directory)
+        let store = EncryptingEventStore(inner: sqlite, keys: keys, redactor: BuiltInRedactor())
         let world = EscrowWorld(directory: directory)
-        let backend = makeBackend()
+        let provider = selectedProvider()
+        let backend = makeBackend(provider)
         let conversation = try await ConversationModel.open(
             store: store,
             tools: world.tools(),
             model: backend.model,
             backendLabel: backend.label
         )
-        let app = AppModel(world: world, conversation: conversation)
+        let app = AppModel(world: world, conversation: conversation, store: store, provider: provider)
         AppRuntime.current = app
         await app.installNotifications()
         return app
+    }
+
+    func select(_ provider: EscrowProvider) async {
+        self.provider = provider
+        UserDefaults.standard.set(provider.rawValue, forKey: Self.providerKey)
+        await conversation.close()
+        let backend = Self.makeBackend(provider)
+        do {
+            conversation = try await ConversationModel.open(
+                store: store,
+                tools: world.tools(),
+                model: backend.model,
+                backendLabel: backend.label
+            )
+            errorMessage = nil
+            await postApprovalIfNeeded()
+        } catch {
+            errorMessage = String(describing: error)
+        }
     }
 
     var showsRecovery: Bool {
@@ -232,19 +280,108 @@ final class AppModel {
         }
     }
 
-    private static func makeBackend() -> (model: any ModelStep, label: String) {
+    private static func selectedProvider() -> EscrowProvider {
         if ProcessInfo.processInfo.arguments.contains("-UseScriptedModel") {
-            return (EscrowScriptedModel(), "Scripted model (launch argument)")
+            return .scripted
         }
-        #if canImport(FoundationModels)
-        if #available(iOS 26, macOS 26, *) {
-            if FoundationModelsStep.isAvailable() {
-                return (EscrowOnDeviceModel.make(), "On-device Foundation Model")
+        let raw = UserDefaults.standard.string(forKey: providerKey) ?? EscrowProvider.scripted.rawValue
+        return EscrowProvider(rawValue: raw) ?? .scripted
+    }
+
+    private static func makeKeys(directory: URL) throws -> any ConversationKeyProvider {
+        #if canImport(Security)
+        return KeychainKeyProvider(service: "EscrowAssistant.keys")
+        #else
+        return try FileKeyProvider(directory: directory.appendingPathComponent("keys", isDirectory: true))
+        #endif
+    }
+
+    private static func makeBackend(_ provider: EscrowProvider) -> (model: any ModelStep, label: String) {
+        let instructions = """
+        You are an escrow assistant in a demo. Use only the provided tools. \
+        lookupProperty is read-only. sendEmail sends one message. scheduleClosing books a closing \
+        and needs approval id \(EscrowScriptedModel.closingApprovalID) first. \
+        Do not invent records, emails, or dates.
+        """
+        switch provider {
+        case .scripted:
+            return (EscrowScriptedModel(), "Scripted planner")
+        case .anthropic:
+            let step = gated(PiAgentStep(
+                provider: AnthropicMessages(
+                    apiKey: NamedSecret(account: "ANTHROPIC_API_KEY"),
+                    secrets: secretStore()
+                ),
+                modelName: "claude-sonnet-4-5",
+                instructions: instructions
+            ))
+            return (step, "Anthropic via PiAgent. Key: ANTHROPIC_API_KEY")
+        case .openai:
+            let step = gated(PiAgentStep(
+                provider: OpenAIResponses(
+                    apiKey: NamedSecret(account: "OPENAI_API_KEY"),
+                    secrets: secretStore()
+                ),
+                modelName: "gpt-4.1",
+                instructions: instructions
+            ))
+            return (step, "OpenAI via PiAgent. Key: OPENAI_API_KEY")
+        case .apple:
+            #if canImport(FoundationModels)
+            if #available(iOS 26, macOS 26, *), FoundationModelsStep.isAvailable() {
+                let step = gated(PiAgentStep(
+                    provider: FoundationModelsProvider(
+                        instructions: instructions,
+                        makeTools: { capture in
+                            [
+                                LookupPropertyFMTool(capture: capture),
+                                SendEmailFMTool(capture: capture),
+                                ScheduleClosingFMTool(capture: capture),
+                            ]
+                        }
+                    ),
+                    modelName: "apple-on-device",
+                    instructions: instructions
+                ))
+                return (step, "Apple on-device via PiAgent")
             }
             let reason = FoundationModelsStep.unavailableReason() ?? "The on-device model is unavailable."
             return (EscrowScriptedModel(), "Scripted fallback. \(reason)")
+            #else
+            return (EscrowScriptedModel(), "Scripted fallback. Foundation Models is not in this build.")
+            #endif
         }
+    }
+
+    private static func secretStore() -> any SecretStore {
+        #if canImport(Security)
+        return KeychainSecretStore(service: "EscrowAssistant")
+        #else
+        return EnvironmentSecretStore()
         #endif
-        return (EscrowScriptedModel(), "Scripted fallback. Foundation Models is not in this build.")
+    }
+
+    private static func gated(_ step: PiAgentStep) -> any ModelStep {
+        ClosingApprovalGate(inner: step)
+    }
+}
+
+/// Holds scheduleClosing until this run has the closing approval.
+private struct ClosingApprovalGate: ModelStep {
+    var inner: PiAgentStep
+
+    func plan(context: ModelContext) async throws -> ScriptedStep {
+        let step = try await inner.plan(context: context)
+        guard case .providerTurn(let turn) = step else { return step }
+        let wantsClosing = turn.calls.contains { $0.name == "scheduleClosing" }
+        let approved = context.grantedApprovalIDs.contains(EscrowScriptedModel.closingApprovalID)
+        if wantsClosing && !approved {
+            return .approval(
+                id: EscrowScriptedModel.closingApprovalID,
+                prompt: EscrowScriptedModel.closingPrompt,
+                risk: .high
+            )
+        }
+        return step
     }
 }
