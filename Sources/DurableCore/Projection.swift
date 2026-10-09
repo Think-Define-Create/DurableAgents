@@ -1,0 +1,289 @@
+import Foundation
+
+struct InflightEffect: Equatable {
+    var stepIndex: Int
+    var callID: CallID
+    var tool: String
+    var effect: EffectKind
+    var key: EffectKey
+    var arguments: JSONValue
+}
+
+enum ApprovalPurpose: String, Equatable {
+    case human
+    case reconcile
+}
+
+struct PendingApproval: Equatable {
+    var approvalID: String
+    var prompt: String
+    var purpose: ApprovalPurpose
+    var token: ResumeToken
+    var stepIndex: Int
+}
+
+struct FoldedSubmission {
+    var requestID: String
+    var payloadHash: String
+    var text: String
+    var script: Script
+    var runID: RunID?
+}
+
+struct FoldedRun {
+    var id: RunID
+    var requestID: String
+    var script: Script
+    var retry: RetryPolicy
+    var status: RunStatus
+    var completedSteps: Int
+    var inflight: InflightEffect?
+    var pending: PendingApproval?
+    var finalText: String?
+    var failure: String?
+}
+
+struct FoldedConversation {
+    var id: ConversationID
+    var submissions: [FoldedSubmission] = []
+    var runs: [String: FoldedRun] = [:]
+    var runOrder: [String] = []
+    var messages: [TranscriptMessage] = []
+
+    var activeRun: FoldedRun? {
+        for runID in runOrder.reversed() {
+            if let run = runs[runID], run.status == .running || run.status == .suspended {
+                return run
+            }
+        }
+        return nil
+    }
+
+    var latestRun: FoldedRun? {
+        guard let last = runOrder.last else { return nil }
+        return runs[last]
+    }
+}
+
+struct Projection {
+    var conversations: [String: FoldedConversation] = [:]
+    var values: [String: JSONValue] = [:]
+
+    static func fold(_ events: [EventEnvelope]) throws -> Projection {
+        var projection = Projection()
+        for event in events {
+            try projection.apply(event)
+        }
+        return projection
+    }
+
+    static func valueKey(namespace: String, key: String) -> String {
+        namespace + "\u{1}" + key
+    }
+
+    mutating func apply(_ event: EventEnvelope) throws {
+        switch event.type {
+        case EventType.timerRequested:
+            return
+        case EventType.stateWrote:
+            guard let namespace = event.payload["namespace"]?.stringValue,
+                  let key = event.payload["key"]?.stringValue,
+                  let value = event.payload["value"]
+            else {
+                throw DurableError.invariant("state.wrote is missing fields at seq \(event.globalSeq)")
+            }
+            values[Self.valueKey(namespace: namespace, key: key)] = value
+        case EventType.messageAppended:
+            guard let message = try EventCodec.transcriptMessage(event) else { return }
+            var conversation = conversation(event.stream)
+            conversation.messages.append(message)
+            conversations[event.stream.raw] = conversation
+        case EventType.conversationOpened:
+            conversations[event.stream.raw] = conversation(event.stream)
+        case EventType.submissionAccepted:
+            guard let requestID = event.payload["requestID"]?.stringValue,
+                  let payloadHash = event.payload["payloadHash"]?.stringValue,
+                  let text = event.payload["text"]?.stringValue,
+                  let scriptValue = event.payload["script"]
+            else {
+                throw DurableError.invariant("submission.accepted is missing fields at seq \(event.globalSeq)")
+            }
+            var conversation = conversation(event.stream)
+            conversation.submissions.append(FoldedSubmission(
+                requestID: requestID,
+                payloadHash: payloadHash,
+                text: text,
+                script: try Script.parse(scriptValue),
+                runID: nil
+            ))
+            conversations[event.stream.raw] = conversation
+        case EventType.runStarted:
+            guard let runRaw = event.payload["runID"]?.stringValue,
+                  let requestID = event.payload["requestID"]?.stringValue,
+                  let scriptValue = event.payload["script"],
+                  let retryValue = event.payload["retry"]
+            else {
+                throw DurableError.invariant("run.started is missing fields at seq \(event.globalSeq)")
+            }
+            var conversation = conversation(event.stream)
+            let runID = RunID(raw: runRaw)
+            conversation.runs[runRaw] = FoldedRun(
+                id: runID,
+                requestID: requestID,
+                script: try Script.parse(scriptValue),
+                retry: try RetryPolicy.parse(retryValue),
+                status: .running,
+                completedSteps: 0
+            )
+            conversation.runOrder.append(runRaw)
+            if let index = conversation.submissions.firstIndex(where: { $0.requestID == requestID && $0.runID == nil }) {
+                conversation.submissions[index].runID = runID
+            }
+            conversations[event.stream.raw] = conversation
+        case EventType.effectIntent:
+            let inflight = try inflight(from: event)
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                if run.inflight != nil {
+                    throw DurableError.invariant("run \(run.id.raw) already has an in-flight effect")
+                }
+                run.inflight = inflight
+            }
+        case EventType.effectResult:
+            guard let callID = event.payload["callID"]?.stringValue else {
+                throw DurableError.invariant("effect.result is missing callID at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                if let inflight = run.inflight, inflight.callID.raw == callID {
+                    run.inflight = nil
+                }
+            }
+        case EventType.stepCompleted:
+            guard let stepIndex = event.payload["stepIndex"]?.intValue else {
+                throw DurableError.invariant("model.step.completed is missing stepIndex at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                guard Int(stepIndex) == run.completedSteps else {
+                    throw DurableError.invariant(
+                        "step \(stepIndex) completed while run \(run.id.raw) was on step \(run.completedSteps)"
+                    )
+                }
+                run.completedSteps += 1
+            }
+        case EventType.approvalRequested:
+            guard let approvalID = event.payload["approvalID"]?.stringValue,
+                  let prompt = event.payload["prompt"]?.stringValue,
+                  let purposeRaw = event.payload["purpose"]?.stringValue,
+                  let purpose = ApprovalPurpose(rawValue: purposeRaw),
+                  let stepIndex = event.payload["stepIndex"]?.intValue,
+                  let tokenRaw = event.payload["token"]?.stringValue,
+                  let token = ResumeToken(raw: tokenRaw)
+            else {
+                throw DurableError.invariant("approval.requested is missing fields at seq \(event.globalSeq)")
+            }
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.pending = PendingApproval(
+                    approvalID: approvalID,
+                    prompt: prompt,
+                    purpose: purpose,
+                    token: token,
+                    stepIndex: Int(stepIndex)
+                )
+                run.status = .suspended
+            }
+        case EventType.approvalResolved:
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.pending = nil
+                if run.status == .suspended {
+                    run.status = .running
+                }
+            }
+        case EventType.runCompleted:
+            let text = event.payload["finalText"]?.stringValue ?? ""
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.status = .completed
+                run.finalText = text
+            }
+        case EventType.runFailed:
+            let reason = event.payload["reason"]?.stringValue ?? "failed"
+            try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
+                run.status = .failed
+                run.failure = reason
+                run.inflight = nil
+                run.pending = nil
+            }
+        default:
+            throw DurableError.invariant("unknown event type \(event.type) at seq \(event.globalSeq)")
+        }
+    }
+
+    private func inflight(from event: EventEnvelope) throws -> InflightEffect {
+        guard let stepIndex = event.payload["stepIndex"]?.intValue,
+              let callRaw = event.payload["callID"]?.stringValue,
+              let tool = event.payload["tool"]?.stringValue,
+              let effectRaw = event.payload["effect"]?.stringValue,
+              let effect = EffectKind(rawValue: effectRaw),
+              let key = event.payload["key"]?.stringValue,
+              let arguments = event.payload["arguments"]
+        else {
+            throw DurableError.invariant("effect.intent is missing fields at seq \(event.globalSeq)")
+        }
+        return InflightEffect(
+            stepIndex: Int(stepIndex),
+            callID: CallID(callRaw),
+            tool: tool,
+            effect: effect,
+            key: EffectKey(raw: key),
+            arguments: arguments
+        )
+    }
+
+    private mutating func updateRun(
+        _ event: EventEnvelope,
+        runID: String?,
+        _ body: (inout FoldedRun) throws -> Void
+    ) throws {
+        guard let runID else {
+            throw DurableError.invariant("\(event.type) is missing runID at seq \(event.globalSeq)")
+        }
+        var conversation = conversation(event.stream)
+        guard var run = conversation.runs[runID] else {
+            throw DurableError.invariant("\(event.type) references unknown run \(runID)")
+        }
+        try body(&run)
+        conversation.runs[runID] = run
+        conversations[event.stream.raw] = conversation
+    }
+
+    private func conversation(_ stream: StreamID) -> FoldedConversation {
+        conversations[stream.raw] ?? FoldedConversation(id: ConversationID(raw: stream.raw))
+    }
+}
+
+extension FoldedRun {
+    func snapshot() -> RunSnapshot {
+        RunSnapshot(
+            id: id,
+            status: status,
+            completedSteps: completedSteps,
+            scriptStepCount: script.steps.count,
+            inflightCallID: inflight?.callID.raw,
+            resumeToken: pending?.token,
+            finalText: finalText,
+            failure: failure
+        )
+    }
+}
+
+extension FoldedConversation {
+    func snapshot() -> ConversationSnapshot {
+        ConversationSnapshot(
+            id: id,
+            submissions: submissions.map {
+                SubmissionInfo(requestID: $0.requestID, payloadHash: $0.payloadHash, text: $0.text, runID: $0.runID)
+            },
+            messages: messages,
+            run: (activeRun ?? latestRun)?.snapshot(),
+            queuedRequestIDs: submissions.filter { $0.runID == nil }.map(\.requestID)
+        )
+    }
+}
