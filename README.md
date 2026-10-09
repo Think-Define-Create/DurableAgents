@@ -20,6 +20,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `PiAgent` | Multi-step loop on the engine: one journaled model checkpoint, parallel safe tools, subagents, forks, compaction. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
 | `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
+| `DurableDelivery` | Journaled webhook, Slack, and APNs delivery with backoff and dead letters. |
 | `DurableObserve` | swift-log adapter for run, model, and effect spans. Attributes are scrubbed. |
 | `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
 | `PiDurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
@@ -103,6 +104,8 @@ Denied approvals fail the run. An external effect that reconciles as `.unknown` 
 
 `resume` records `approver` and `authLevel` on `approval.resolved`. A high-risk approval requires at least `devicePasscode`. `biometric` also satisfies that bar. `ApprovalChannel` is how a host is told: `LocalNotificationChannel` builds a notification draft, `PushApprovalChannel` builds an APNs `aps` alert, `WebhookApprovalChannel` posts either a Slack `{"text"}` body or a generic JSON body, and `WebApprovalChannel` keeps an in-app list. An optional webhook `Authorization` header is not written to the log.
 
+Set `WebhookApprovalChannel.durable` or `PushApprovalChannel.destination` to journal the send instead of posting inline. The engine then starts a `durable.deliver` run. Register `DeliveryTool` for that name. See Outbound delivery.
+
 `.approval(..., expiresAt:escalateTo:)` suspends until the engine clock passes `expiresAt`. `pumpTimers` and `recover` then append `approval.escalated`. With `escalateTo`, a new approval is requested for that audience and does not expire again. Without it, the run fails with `approval expired`.
 
 Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) live in the sample app. They are Apple-only and were not compiled here. `ApprovalAppleSupport` reports those imports as unavailable on Linux.
@@ -113,11 +116,23 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 
 ## Timers and retry
 
-`RetryPolicy` is stored on `run.started`. `stub` allows one attempt, so a thrown tool error still fails the run. A policy with more attempts retries `pure`, `idempotent`, and `transactional` tools with exponential backoff and optional jitter, and journals `effect.retry` plus a timer. `external` is never retried automatically; recovery still calls `reconcile`.
+`RetryPolicy` is stored on `run.started`. `stub` allows one attempt, so a thrown tool error still fails the run. That is still the engine default. `RetryPolicy.standard` is the opt-in schedule: five attempts, half a second doubling, 20% jitter. A policy with more attempts retries `pure`, `idempotent`, and `transactional` tools with exponential backoff and optional jitter, and journals `effect.retry` plus a timer. `external` is never retried automatically; recovery still calls `reconcile`. A tool that throws `DeliveryRetry` is the exception: a retryable failure uses the run's schedule (or the receiver's `Retry-After`), and a non-retryable failure or an exhausted schedule writes `delivery.deadLettered`.
 
 `requestTimer(name:fireAt:)` appends `timer.requested`. `Engine.pumpTimers()` and `recover()` append `timer.fired` when the engine clock is past the deadline, then continue the run. Pending timers are re-registered with `TimerScheduling` and `BackgroundWakeScheduling` after a restart. On Apple, `BGTaskSchedulerWake` submits a `BGAppRefreshTaskRequest`; the journal remains the source of truth.
 
 Script steps `.sleepUntil` and `.waitSignal` suspend the run. `Engine.signal(_:payload:)` resumes a waiting signal, and a signal that arrives first is kept until the wait starts.
+
+## Outbound delivery
+
+`DurableDelivery` sends a journaled effect of kind `external`. Reconcile returns `.notDone`, so a crash after `effect.intent` and before `effect.result` posts again with the same engine key. That key is the `Idempotency-Key` header and the `delivery-id` field on webhook and Slack bodies. APNs does not get `Idempotency-Key`. The documented `apns-id` header is a UUID derived from the key, and the payload also carries `delivery-id`.
+
+Retry when the error is a network failure, HTTP 429, or HTTP 5xx. Honor `Retry-After` (delta-seconds or an HTTP date) when it is present; otherwise use the run's backoff. Do not retry other 4xx. After the last attempt, or immediately on a refused status, the run records `effect.result` with `ok: false`, `delivery.deadLettered`, and `run.failed`. The dead-letter payload has the key, the reason, the attempt count, and the status. It does not include the request body or any secret.
+
+Delivery runs started from an approval channel use `RetryPolicy.standard` even if the engine was created with `stub`. A host that calls the tool from its own script uses the engine's policy, so pass `.standard` when that script should retry. `stub` still dead-letters a `DeliveryRetry` after one try.
+
+Generic webhooks are signed with HMAC-SHA256. `X-Timestamp` is unix seconds. `X-Signature` is `v1=` plus the hex of HMAC-SHA256(secret, `"<timestamp>.<raw body>"`). The body is canonical JSON, and the signature covers those exact bytes, including `delivery-id`. Verifiers should reject a timestamp outside a few minutes. The signing secret is a secret-account name (`signingSecretAccount`), resolved at send time, and is not journaled. The same is true of `authorizationSecretAccount` and of a Slack URL stored under `webhookSecretAccount`. Slack incoming webhooks are not signed; their documented body is `{"text":"..."}` plus our `delivery-id`. Do not put a Slack URL that contains the token in the journal.
+
+APNs uses token auth. The JWT header is `alg` `ES256` and `kid`. The claims are `iss` and `iat`. The `.p8` key is PKCS#8 PEM loaded from `authKeyAccount`. Request headers follow Apple's current token-auth API: `authorization: bearer <jwt>`, `apns-topic`, `apns-push-type`, `apns-id`, and `apns-priority` (`10` for `alert`, `5` for `background`). The host is `api.push.apple.com` or `api.sandbox.push.apple.com`. `APNsLiveSender` uses `URLSession` HTTP/2 and is compiled only on Apple. Linux Foundation is HTTP/1.1, so `APNsSupport.liveSenderCompiled` is false there and a live send throws. The JWT builder, the request builder, and a stubbed HTTP transport are what the Linux tests exercise. The live Apple sender was not compiled or verified in this environment.
 
 ## Model steps
 

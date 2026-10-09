@@ -28,6 +28,8 @@ public enum EventType {
     public static let retentionPurged = "retention.purged"
     public static let approvalEscalated = "approval.escalated"
     public static let importNote = "import.note"
+    /// The delivery effect exhausted its attempts, or the receiver refused it.
+    public static let deliveryDeadLettered = "delivery.deadLettered"
 
     public static let messageAppendedCurrentVersion = 2
 }
@@ -139,7 +141,7 @@ public struct TranscriptMessage: Sendable, Equatable {
 }
 
 /// Recorded on `run.started`. Automatic retries apply only to `automaticKinds`.
-/// External effects follow reconcile, not this backoff.
+/// External effects follow reconcile, not this backoff, unless the tool throws `DeliveryRetry`.
 public struct RetryPolicy: Sendable, Equatable {
     public var maxAttempts: Int
     public var initialBackoffSeconds: Double
@@ -163,7 +165,19 @@ public struct RetryPolicy: Sendable, Equatable {
     }
 
     /// One attempt, so a thrown tool error fails the run. Kept for existing journals.
+    /// This remains the engine default. Opt in with `standard` when a run should retry.
     public static let stub = RetryPolicy(maxAttempts: 1, initialBackoffSeconds: 1, multiplier: 2)
+
+    /// Opt-in schedule: five attempts, starting at half a second and doubling, with 20% jitter.
+    /// `pure`, `idempotent`, and `transactional` retry on their own. `external` does not,
+    /// unless the body throws `DeliveryRetry`. Journaled deliveries use this schedule
+    /// even when the engine itself was created with `stub`.
+    public static let standard = RetryPolicy(
+        maxAttempts: 5,
+        initialBackoffSeconds: 0.5,
+        multiplier: 2,
+        jitterRatio: 0.2
+    )
 
     public func allowsAutomaticRetry(_ kind: EffectKind) -> Bool {
         automaticKinds.contains(kind) && kind != .external

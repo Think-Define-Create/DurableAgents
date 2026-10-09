@@ -58,3 +58,30 @@ public enum DurableError: Error, Sendable, Equatable, CustomStringConvertible {
 public struct SimulatedProcessCrash: Error, Sendable, Equatable {
     public init() {}
 }
+
+/// A journaled outbound delivery failed.
+///
+/// `retryable` is true for a network error, HTTP 429, and HTTP 5xx. Other 4xx
+/// and a refused payload set it false so the engine dead-letters immediately.
+/// `retryAfter` is the receiver's `Retry-After` delay when one was provided.
+/// The description is safe to journal: it has no URL, header secret, or body.
+public struct DeliveryRetry: Error, Sendable, Equatable, CustomStringConvertible {
+    public var retryable: Bool
+    public var retryAfter: TimeInterval?
+    public var reason: String
+    public var status: Int?
+
+    public init(retryable: Bool, retryAfter: TimeInterval? = nil, reason: String, status: Int? = nil) {
+        self.retryable = retryable
+        self.retryAfter = retryAfter
+        self.reason = reason
+        self.status = status
+    }
+
+    public var description: String {
+        if let status {
+            return "delivery status \(status): \(reason)"
+        }
+        return "delivery: \(reason)"
+    }
+}

@@ -82,6 +82,80 @@ import Testing
     await engine.close()
 }
 
+@Test func deliveryRetryDeadLettersWhenThePolicyAllowsOneAttempt() async throws {
+    let harness = try makeHarness(.memory)
+    let tool = Tool(name: "send", effect: .external, reconcile: { _, _ in .notDone }) { _, _ in
+        throw DeliveryRetry(retryable: true, reason: "http 503", status: 503)
+    }
+    let engine = try await harness.engine(tools: [tool], retryPolicy: .stub)
+    let result = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "send",
+        script: crashScript(tool: "send", callID: "c1")
+    ))
+    #expect(result.runStatus == .failed)
+    let events = try await engine.events(for: result.conversationID)
+    #expect(!events.contains { $0.type == EventType.effectRetry })
+    let dead = try #require(events.first { $0.type == EventType.deliveryDeadLettered })
+    #expect(dead.payload["status"]?.intValue == 503)
+    #expect(dead.payload["attempts"]?.intValue == 1)
+    await engine.close()
+}
+
+@Test func deliveryRetryWaitsForRetryAfterThenSucceeds() async throws {
+    let harness = try makeHarness(.memory)
+    let recorder = Recorder()
+    let tool = Tool(name: "send", effect: .external, reconcile: { _, _ in .notDone }) { _, context in
+        await recorder.add(context)
+        if context.attempt == 1 {
+            throw DeliveryRetry(retryable: true, retryAfter: 12, reason: "http 429", status: 429)
+        }
+        return ToolReturn(output: .string("sent"))
+    }
+    let engine = try await harness.engine(tools: [tool], retryPolicy: .standard)
+    let started = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "send",
+        script: crashScript(tool: "send", callID: "c1")
+    ))
+    #expect(started.runStatus == .running)
+    harness.clock.advance(by: 11)
+    let early = try await engine.pumpTimers()
+    #expect(early.first?.runStatus == .running)
+    #expect(await recorder.calls.count == 1)
+    harness.clock.advance(by: 1)
+    let done = try await engine.pumpTimers()
+    #expect(done.first?.runStatus == .completed)
+    let calls = await recorder.calls
+    #expect(calls.count == 2)
+    #expect(calls[0].key == calls[1].key)
+    await engine.close()
+}
+
+@Test func refusedDeliveryDoesNotRetry() async throws {
+    let harness = try makeHarness(.memory)
+    let recorder = Recorder()
+    let tool = Tool(name: "send", effect: .external, reconcile: { _, _ in .notDone }) { _, context in
+        await recorder.add(context)
+        throw DeliveryRetry(retryable: false, reason: "http 400", status: 400)
+    }
+    let engine = try await harness.engine(
+        tools: [tool],
+        retryPolicy: RetryPolicy(maxAttempts: 5, initialBackoffSeconds: 0, multiplier: 1)
+    )
+    let result = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "send",
+        script: crashScript(tool: "send", callID: "c1")
+    ))
+    #expect(result.runStatus == .failed)
+    #expect(await recorder.calls.count == 1)
+    let events = try await engine.events(for: result.conversationID)
+    #expect(events.contains { $0.type == EventType.deliveryDeadLettered })
+    #expect(!events.contains { $0.type == EventType.effectRetry })
+    await engine.close()
+}
+
 @Test func sleepUntilSurvivesRestartUntilTheTimerFires() async throws {
     let harness = try makeHarness(.sqlite)
     let wake = harness.clock.now().addingTimeInterval(15)

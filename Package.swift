@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "PiAI", targets: ["PiAI"]),
         .library(name: "PiAgent", targets: ["PiAgent"]),
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
+        .library(name: "DurableDelivery", targets: ["DurableDelivery"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
         .library(name: "PiDurableImport", targets: ["PiDurableImport"]),
@@ -181,6 +182,23 @@ let package = Package(
         .testTarget(
             name: "PiDurableImportTests",
             dependencies: ["PiDurableImport", "DurableCore", "DurableStore", "PiDurableImportCLI"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "DurableDelivery",
+            dependencies: [
+                "DurableCore",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "DurableDeliveryTests",
+            dependencies: ["DurableDelivery", "DurableCore", "DurableStore"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

@@ -24,6 +24,10 @@ public actor Engine {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var poisoned = false
     private var closed = false
+    /// Approval channels enqueue these while the lock is held. Flushed before the lock is released.
+    private var pendingDeliveries: [JournaledDelivery] = []
+    /// Set only while starting a delivery run, so deliveries use `RetryPolicy.standard`.
+    private var policyOverride: RetryPolicy?
 
     public init(
         store: any EventStore,
@@ -223,7 +227,9 @@ public actor Engine {
             try ensureWritable()
             try await fireDueTimers()
             await reschedulePendingTimers()
-            return try await continueRunning()
+            let actions = try await continueRunning()
+            try await requeueMissingApprovalDeliveries()
+            return actions
         }
     }
 
@@ -459,7 +465,7 @@ public actor Engine {
             "runID": .string(runID.raw),
             "requestID": .string(submission.requestID),
             "script": submission.script.json(),
-            "retry": retryPolicy.json(),
+            "retry": (policyOverride ?? retryPolicy).json(),
         ]
         if submission.driver == .model {
             payload["driver"] = .string(RunDriver.model.rawValue)
@@ -718,7 +724,7 @@ public actor Engine {
                     audience: nil
                 ),
             ])
-            await approvals.deliver(Self.notice(
+            let notice = Self.notice(
                 conversation: conversation,
                 run: run,
                 approvalID: spec.id,
@@ -728,7 +734,9 @@ public actor Engine {
                 token: token,
                 expiresAt: spec.expiresAt,
                 audience: spec.escalateTo
-            ))
+            )
+            await approvals.deliver(notice)
+            captureDeliveries(for: notice)
         case .tool(let name, let callRaw, let arguments):
             if callRaw.isEmpty {
                 throw DurableError.invariant("tool call id is empty")
@@ -1345,25 +1353,38 @@ public actor Engine {
     ) async throws {
         let reason = String(describing: error)
         let nextAttempt = max(inflight.attempt, 1) + 1
+        if let delivery = error as? DeliveryRetry {
+            if delivery.retryable, nextAttempt <= run.retry.maxAttempts {
+                let delay = delivery.retryAfter ?? run.retry.delaySeconds(forAttempt: nextAttempt, jitterUnit: jitter.unit())
+                try await scheduleEffectRetry(
+                    conversation: conversation,
+                    run: run,
+                    inflight: inflight,
+                    nextAttempt: nextAttempt,
+                    delay: delay,
+                    reason: reason
+                )
+                return
+            }
+            try await deadLetterDelivery(
+                conversation: conversation,
+                run: run,
+                inflight: inflight,
+                reason: reason,
+                status: delivery.status
+            )
+            return
+        }
         if run.retry.allowsAutomaticRetry(inflight.effect), nextAttempt <= run.retry.maxAttempts {
             let delay = run.retry.delaySeconds(forAttempt: nextAttempt, jitterUnit: jitter.unit())
-            let fireAt = clock.now().addingTimeInterval(delay)
-            let timerName = "retry-\(inflight.callID.raw)-\(nextAttempt)"
-            _ = try await commit(.conversation(conversation.id), [
-                EventDraft(
-                    type: EventType.effectRetry,
-                    payload: .object([
-                        "runID": .string(run.id.raw),
-                        "callID": .string(inflight.callID.raw),
-                        "attempt": .int(Int64(nextAttempt)),
-                        "fireAt": .double(fireAt.timeIntervalSince1970),
-                        "timerName": .string(timerName),
-                        "kind": .string(inflight.effect.rawValue),
-                        "error": .string(reason),
-                    ])
-                ),
-            ])
-            try await armTimer(name: timerName, fireAt: fireAt)
+            try await scheduleEffectRetry(
+                conversation: conversation,
+                run: run,
+                inflight: inflight,
+                nextAttempt: nextAttempt,
+                delay: delay,
+                reason: reason
+            )
             return
         }
         _ = try await commit(.conversation(conversation.id), [
@@ -1384,6 +1405,153 @@ public actor Engine {
                 ])
             ),
         ])
+    }
+
+    private func scheduleEffectRetry(
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        inflight: InflightEffect,
+        nextAttempt: Int,
+        delay: TimeInterval,
+        reason: String
+    ) async throws {
+        let fireAt = clock.now().addingTimeInterval(delay)
+        let timerName = "retry-\(inflight.callID.raw)-\(nextAttempt)"
+        _ = try await commit(.conversation(conversation.id), [
+            EventDraft(
+                type: EventType.effectRetry,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "callID": .string(inflight.callID.raw),
+                    "attempt": .int(Int64(nextAttempt)),
+                    "fireAt": .double(fireAt.timeIntervalSince1970),
+                    "timerName": .string(timerName),
+                    "kind": .string(inflight.effect.rawValue),
+                    "error": .string(reason),
+                ])
+            ),
+        ])
+        try await armTimer(name: timerName, fireAt: fireAt)
+    }
+
+    private func deadLetterDelivery(
+        conversation: FoldedConversation,
+        run: FoldedRun,
+        inflight: InflightEffect,
+        reason: String,
+        status: Int?
+    ) async throws {
+        var dead: [String: JSONValue] = [
+            "runID": .string(run.id.raw),
+            "callID": .string(inflight.callID.raw),
+            "key": .string(inflight.key.raw),
+            "reason": .string(reason),
+            "attempts": .int(Int64(max(inflight.attempt, 1))),
+        ]
+        if let status {
+            dead["status"] = .int(Int64(status))
+        }
+        _ = try await commit(.conversation(conversation.id), [
+            Self.resultDraft(
+                run: run,
+                inflight: inflight,
+                ok: false,
+                output: .null,
+                replayed: false,
+                reconciled: false,
+                error: reason
+            ),
+            EventDraft(type: EventType.deliveryDeadLettered, payload: .object(dead)),
+            EventDraft(
+                type: EventType.runFailed,
+                payload: .object([
+                    "runID": .string(run.id.raw),
+                    "reason": .string(reason),
+                ])
+            ),
+        ])
+    }
+
+    private func captureDeliveries(for notice: ApprovalNotice) {
+        for job in approvals.journaledDeliveries(for: notice) where !pendingDeliveries.contains(where: { $0.id == job.id }) {
+            pendingDeliveries.append(job)
+        }
+    }
+
+    /// Pending approvals whose delivery run was never submitted (the process died before the flush).
+    private func requeueMissingApprovalDeliveries() async throws {
+        let projection = try await load()
+        for key in projection.conversationOrder {
+            guard let conversation = projection.conversations[key],
+                  let run = conversation.activeRun,
+                  let pending = run.pending,
+                  pending.purpose == .human
+            else { continue }
+            captureDeliveries(for: Self.notice(
+                conversation: conversation,
+                run: run,
+                approvalID: pending.approvalID,
+                prompt: pending.prompt,
+                risk: pending.risk,
+                purpose: pending.purpose.rawValue,
+                token: pending.token,
+                expiresAt: pending.expiresAt,
+                audience: pending.audience
+            ))
+        }
+    }
+
+    private func deliveryAlreadySubmitted(_ id: String) async throws -> Bool {
+        let requestID = "delivery:\(id)"
+        let projection = try await load()
+        for conversation in projection.conversations.values {
+            if conversation.submissions.contains(where: { $0.requestID == requestID }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Submits each queued delivery as its own conversation so a suspended approval does not block the send.
+    /// Uses `RetryPolicy.standard` for that run only. Must run while the engine lock is already held.
+    private func flushDeliveries() async throws {
+        var spins = 0
+        while !pendingDeliveries.isEmpty {
+            spins += 1
+            if spins > 100 {
+                throw DurableError.invariant("delivery flush did not settle")
+            }
+            let job = pendingDeliveries.removeFirst()
+            if try await deliveryAlreadySubmitted(job.id) {
+                continue
+            }
+            guard tools[job.toolName] != nil else {
+                pendingDeliveries.insert(job, at: 0)
+                return
+            }
+            let script = Script(steps: [
+                .tool(name: job.toolName, callID: "deliver", arguments: job.arguments),
+            ])
+            let text = "delivery \(job.id)"
+            let requestID = "delivery:\(job.id)"
+            policyOverride = RetryPolicy.standard
+            do {
+                _ = try await accept(
+                    text: text,
+                    requestID: requestID,
+                    hash: Submission(requestID: requestID, text: text, script: script).payloadHash(),
+                    script: script,
+                    driver: .script,
+                    existing: nil,
+                    continueFirst: false
+                )
+            } catch {
+                policyOverride = nil
+                pendingDeliveries.insert(job, at: 0)
+                throw error
+            }
+            policyOverride = nil
+        }
     }
 
     private func armTimer(name: String, fireAt: Date) async throws {
@@ -1525,6 +1693,9 @@ public actor Engine {
         await lock()
         do {
             let value = try await body()
+            if !poisoned && !closed {
+                try await flushDeliveries()
+            }
             unlock()
             return value
         } catch {
@@ -1751,7 +1922,7 @@ public actor Engine {
                     audience: audience
                 ),
             ])
-            await approvals.deliver(Self.notice(
+            let notice = Self.notice(
                 conversation: conversation,
                 run: run,
                 approvalID: approvalID,
@@ -1761,7 +1932,9 @@ public actor Engine {
                 token: token,
                 expiresAt: nil,
                 audience: audience
-            ))
+            )
+            await approvals.deliver(notice)
+            captureDeliveries(for: notice)
             return
         }
         _ = try await commit(.conversation(conversation.id), [
