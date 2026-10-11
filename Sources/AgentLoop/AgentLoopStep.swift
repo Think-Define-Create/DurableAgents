@@ -18,6 +18,9 @@ public struct AgentLoopStep: ModelStep {
     public var compactAfterMessages: Int
     public var keepRecentMessages: Int
     public var subagentTools: Set<String>
+    /// Definitions offered to the model in addition to the engine's tools, such as a subagent
+    /// tool with its own parameters.
+    public var extraTools: [ModelToolDefinition]
 
     public init(
         provider: any ModelProvider,
@@ -26,7 +29,8 @@ public struct AgentLoopStep: ModelStep {
         maxOutputTokens: Int = 1024,
         compactAfterMessages: Int = .max,
         keepRecentMessages: Int = 2,
-        subagentTools: Set<String> = []
+        subagentTools: Set<String> = [],
+        extraTools: [ModelToolDefinition] = []
     ) {
         self.provider = provider
         self.modelName = modelName
@@ -35,6 +39,7 @@ public struct AgentLoopStep: ModelStep {
         self.compactAfterMessages = compactAfterMessages
         self.keepRecentMessages = max(0, keepRecentMessages)
         self.subagentTools = subagentTools
+        self.extraTools = extraTools
     }
 
     public func plan(context: ModelContext) async throws -> ScriptedStep {
@@ -115,6 +120,9 @@ public struct AgentLoopStep: ModelStep {
                 parametersJSON: spec.parametersJSON
             )
         }
+        for extra in extraTools where !tools.contains(where: { $0.name == extra.name }) {
+            tools.append(extra)
+        }
         for name in subagentTools.sorted() where !tools.contains(where: { $0.name == name }) {
             tools.append(ModelToolDefinition(
                 name: name,
@@ -125,6 +133,10 @@ public struct AgentLoopStep: ModelStep {
         return tools
     }
 
+    /// Rebuilds provider messages from the journal. The engine journals a step's tool results
+    /// before the step's own text, so each run of tool results gets an assistant message carrying
+    /// the calls (and that step's text) in front of it, as the cloud APIs require. Results from
+    /// earlier runs, whose calls are no longer in the context, are passed as plain user text.
     static func modelMessages(_ context: ModelContext) -> [ModelMessage] {
         var records: [String: CompletedToolCall] = [:]
         for call in context.completedTools {
@@ -136,35 +148,50 @@ public struct AgentLoopStep: ModelStep {
         while index < source.count {
             let message = source[index]
             if message.role == "tool" {
-                let name = message.callID.flatMap { records[$0]?.name }
-                messages.append(ModelMessage(
-                    role: .tool,
-                    text: message.text,
-                    toolCallID: message.callID,
-                    toolName: name
-                ))
-                index += 1
-                continue
-            }
-            if message.role == "assistant" {
-                var calls: [ProviderToolCall] = []
-                var look = index + 1
-                while look < source.count, source[look].role == "tool" {
-                    let toolMessage = source[look]
-                    if let callID = toolMessage.callID, let record = records[callID] {
-                        calls.append(ProviderToolCall(
-                            id: callID,
-                            name: record.name,
-                            argumentsJSON: record.arguments.canonicalJSON()
-                        ))
-                    }
-                    look += 1
+                var group: [TranscriptMessage] = []
+                while index < source.count, source[index].role == "tool" {
+                    group.append(source[index])
+                    index += 1
                 }
-                messages.append(ModelMessage(role: .assistant, text: message.text, toolCalls: calls))
-                index += 1
+                let paired = group.filter { $0.callID.flatMap { records[$0] } != nil }
+                let claimed = messages.last.map { last in
+                    last.role == .assistant && paired.allSatisfy { tool in last.toolCalls.contains { $0.id == tool.callID } }
+                } ?? false
+                if !paired.isEmpty, !claimed {
+                    var text = ""
+                    if index < source.count, source[index].role == "assistant", source[index].messageID.hasPrefix("m_turn_") {
+                        text = source[index].text
+                        index += 1
+                    }
+                    let calls = paired.compactMap { tool -> ProviderToolCall? in
+                        guard let callID = tool.callID, let record = records[callID] else { return nil }
+                        return ProviderToolCall(id: callID, name: record.name, argumentsJSON: record.arguments.canonicalJSON())
+                    }
+                    if let last = messages.last, last.role == .assistant, last.toolCalls.isEmpty {
+                        // Two assistant messages in a row would read as a prefill; attach the calls instead.
+                        messages[messages.count - 1].toolCalls = calls
+                        if !text.isEmpty {
+                            messages[messages.count - 1].text += (last.text.isEmpty ? "" : "\n") + text
+                        }
+                    } else {
+                        messages.append(ModelMessage(role: .assistant, text: text, toolCalls: calls))
+                    }
+                }
+                for tool in group {
+                    if let callID = tool.callID, let record = records[callID] {
+                        messages.append(ModelMessage(role: .tool, text: tool.text, toolCallID: callID, toolName: record.name))
+                    } else {
+                        messages.append(ModelMessage(role: .user, text: "Tool result from earlier: \(tool.text)"))
+                    }
+                }
                 continue
             }
-            let role: ModelMessage.Role = message.role == "system" ? .system : .user
+            let role: ModelMessage.Role
+            switch message.role {
+            case "assistant": role = .assistant
+            case "system": role = .system
+            default: role = .user
+            }
             messages.append(ModelMessage(role: role, text: message.text))
             index += 1
         }

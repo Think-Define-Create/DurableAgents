@@ -64,6 +64,11 @@ public actor EncryptingEventStore: EventStore {
         try await decryptAll(try await inner.read(stream: stream))
     }
 
+    /// Only the new events are decrypted, which is most of what the engine's incremental read saves.
+    public func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope] {
+        try await decryptAll(try await inner.readAll(after: globalSeq))
+    }
+
     public func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws {
         let stored = try await inner.readAll()
         guard let event = stored.first(where: { $0.globalSeq == globalSeq }) else {
@@ -105,7 +110,7 @@ public actor EncryptingEventStore: EventStore {
         switch error {
         case .shredded, .missingKey:
             return true
-        case .malformedCiphertext:
+        case .malformedCiphertext, .keyUnavailable:
             return false
         }
     }
@@ -118,7 +123,7 @@ public actor EncryptingEventStore: EventStore {
             throw SecurityError.malformedCiphertext("event \(event.globalSeq) is not an AES-GCM payload")
         }
         let key = try await keys.loadKey(for: event.stream.raw)
-        let plain = try AESGCM.open(boxed, key: key)
+        let plain = try AESGCM.open(boxed, key: key, scope: event.stream.raw)
         guard let text = String(data: plain, encoding: .utf8) else {
             throw SecurityError.malformedCiphertext("event \(event.globalSeq) did not decrypt to UTF-8")
         }

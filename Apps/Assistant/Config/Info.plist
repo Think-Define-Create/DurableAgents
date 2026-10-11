@@ -6,13 +6,12 @@
 	<array>
 		<string>dev.thinkdefinecreate.Assistant.refresh</string>
 		<string>dev.thinkdefinecreate.Assistant.processing</string>
+		<string>dev.thinkdefinecreate.Assistant.reply.*</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
 		<string>processing</string>
 	</array>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Assistant uses Face ID or your device passcode before a high-risk approval is recorded.</string>
 </dict>
 </plist>

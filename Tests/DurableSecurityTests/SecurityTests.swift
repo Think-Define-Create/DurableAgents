@@ -153,3 +153,60 @@ private func lease(_ store: any EventStore) async throws -> FenceToken {
     let acquired = try await store.acquireLease(owner: UUID(), pid: 1, ttl: .seconds(60))
     return FenceToken(owner: acquired.owner, epoch: acquired.epoch)
 }
+
+/// The Keychain provider makes a new key when one is missing, so after a shred the old ciphertext
+/// meets a different key. That must read as shredded, not fail the whole store.
+private actor RegeneratingKeys: ConversationKeyProvider {
+    private var keys: [String: Data] = [:]
+
+    func loadKey(for scope: String) async throws -> Data {
+        if let key = keys[scope] { return key }
+        let made = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        keys[scope] = made
+        return made
+    }
+
+    func shred(_ scope: String) async throws {
+        keys[scope] = nil
+    }
+}
+
+@Test func aShreddedConversationIsSkippedEvenWhenTheProviderMakesANewKey() async throws {
+    let keys = RegeneratingKeys()
+    let inner = InMemoryEventStore(storeID: "regen")
+    let writer = EncryptingEventStore(inner: inner, keys: keys)
+    let fence = try await lease(writer)
+    for stream in ["kept", "gone"] {
+        _ = try await writer.commit(fence: fence, stream: StreamID(stream), events: [
+            EventDraft(type: EventType.messageAppended, payload: .object(["text": .string(stream)])),
+        ])
+    }
+    try await keys.shred("gone")
+    let reader = EncryptingEventStore(inner: inner, keys: keys, omitShredded: true)
+    let events = try await reader.readAll()
+    #expect(events.map { $0.payload["text"]?.stringValue } == ["kept"])
+}
+
+/// The engine folds the log incrementally. A purge rewrites old payloads in place, so an engine
+/// that is still open must rebuild its view instead of keeping the purged text.
+@Test func anOpenEngineForgetsPurgedMessages() async throws {
+    let store = InMemoryEventStore(storeID: "purge-live")
+    let engine = try await Engine(store: store, leaseTTL: .seconds(600))
+    let sent = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "secret-to-purge",
+        script: Script(steps: [.finish("ok")])
+    ))
+    #expect(try await engine.snapshot(sent.conversationID).messages.contains { $0.text == "secret-to-purge" })
+
+    let purged = try await Retention.purge(
+        store,
+        fence: await engine.currentFence(),
+        stream: .conversation(sent.conversationID),
+        policy: RetentionPolicy(maxAge: 60, eventTypes: [EventType.messageAppended]),
+        now: Date().addingTimeInterval(100_000)
+    )
+    #expect(purged > 0)
+    #expect(try await !engine.snapshot(sent.conversationID).messages.contains { $0.text == "secret-to-purge" })
+    await engine.close()
+}

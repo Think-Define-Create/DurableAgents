@@ -99,6 +99,15 @@ public actor InMemoryEventStore: EventStore {
 
     public func readAll() async throws -> [EventEnvelope] { events }
 
+    public func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope] {
+        // Sequences are dense from 1, so the tail starts at index `globalSeq`.
+        let start = min(Int(clamping: globalSeq), events.count)
+        if start > 0, events[start - 1].globalSeq != globalSeq {
+            return events.filter { $0.globalSeq > globalSeq }
+        }
+        return Array(events[start...])
+    }
+
     public func read(stream: StreamID) async throws -> [EventEnvelope] {
         events.filter { $0.stream == stream }
     }

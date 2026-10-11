@@ -11,9 +11,11 @@ public struct HashEmbedder: Embedder {
     public var id: String
     public var dimensions: Int
 
-    public init(id: String = "hash-v1", dimensions: Int = 8) {
-        self.id = id
-        self.dimensions = max(1, dimensions)
+    /// The default id names the dimension count, so two hash sizes never share an index.
+    public init(id: String? = nil, dimensions: Int = 8) {
+        let dimensions = max(1, dimensions)
+        self.id = id ?? (dimensions == 8 ? "hash-v1" : "hash-v1-\(dimensions)")
+        self.dimensions = dimensions
     }
 
     public func embed(_ texts: [String]) async throws -> [[Float]] {

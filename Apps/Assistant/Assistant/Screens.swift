@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import DurableIdentity
 import DurableMCP
 import DurableMemory
@@ -8,80 +8,6 @@ import SwiftUI
 
 extension MemoryEdge {
     var rowID: String { "\(from)|\(relation)|\(to)" }
-}
-
-struct RootView: View {
-    @Bindable var model: AssistantModel
-
-    var body: some View {
-        NavigationSplitView {
-            List(AssistantScreen.allCases, selection: $model.screen) { screen in
-                Text(screen.title).tag(screen)
-            }
-            .navigationTitle("Assistant")
-        } detail: {
-            Group {
-                switch model.phase {
-                case .loading:
-                    ProgressView("Opening the journal")
-                case .failed(let message):
-                    ContentUnavailableView("Could not open Assistant", systemImage: "exclamationmark.triangle", description: Text(message))
-                case .ready:
-                    screen
-                }
-            }
-            .navigationTitle(model.screen.title)
-            .safeAreaInset(edge: .top) {
-                if !model.banner.isEmpty {
-                    Text(model.banner)
-                        .font(.footnote)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .background(.quaternary)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var screen: some View {
-        switch model.screen {
-        case .chat: ChatScreen(model: model)
-        case .identity: IdentityScreen(model: model)
-        case .skills: SkillsScreen(model: model)
-        case .memory: MemoryScreen(model: model)
-        case .routines: RoutinesScreen(model: model)
-        case .mcp: MCPScreen(model: model)
-        case .approvals: ApprovalsScreen(model: model)
-        case .settings: SettingsScreen(model: model)
-        }
-    }
-}
-
-struct ChatScreen: View {
-    @Bindable var model: AssistantModel
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if model.messages.isEmpty {
-                ContentUnavailableView("No messages yet", systemImage: "bubble.left", description: Text("Ask something. The demo model answers on this device without a network."))
-            } else {
-                List(model.messages, id: \.messageID) { message in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(message.role).font(.caption).foregroundStyle(.secondary)
-                        Text(message.text)
-                    }
-                }
-            }
-            HStack {
-                TextField("Message", text: $model.draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                Button("Send") { Task { await model.send() } }
-                    .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding()
-        }
-    }
 }
 
 struct IdentityScreen: View {
@@ -102,6 +28,7 @@ struct IdentityScreen: View {
                 Button("Diff") { Task { await model.showIdentityDiff() } }
                 Button("Revert") { Task { await model.revertIdentity() } }
             }
+            .buttonStyle(.borderless)
             if !model.identityDiff.isEmpty {
                 Text(model.identityDiff).font(.caption.monospaced())
             }
@@ -117,10 +44,12 @@ struct IdentityScreen: View {
                             Button("Approve") { Task { await model.decideIdentity(proposal.id, approved: true) } }
                             Button("Reject") { Task { await model.decideIdentity(proposal.id, approved: false) } }
                         }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
         }
+        .navigationTitle("Soul")
     }
 }
 
@@ -138,6 +67,7 @@ struct SkillsScreen: View {
                 Button("Install") { Task { await model.installSkill(proposed: false) } }
                 Button("Propose") { Task { await model.installSkill(proposed: true) } }
             }
+            .buttonStyle(.borderless)
             if model.skills.isEmpty {
                 Text("No skills installed.")
                     .foregroundStyle(.secondary)
@@ -165,10 +95,12 @@ struct SkillsScreen: View {
                             Button("Approve") { Task { await model.decideSkill(proposal.id, approved: true) } }
                             Button("Reject") { Task { await model.decideSkill(proposal.id, approved: false) } }
                         }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
         }
+        .navigationTitle("Skills")
     }
 }
 
@@ -199,11 +131,19 @@ struct MemoryScreen: View {
                 Text("\(edge.from) \(edge.relation) \(edge.to)")
             }
         }
+        .navigationTitle("Memory")
     }
 }
 
 struct RoutinesScreen: View {
     @Bindable var model: AssistantModel
+
+    private var routineBot: Binding<String> {
+        Binding(
+            get: { model.routineAgentID ?? model.featured?.id ?? "" },
+            set: { model.routineAgentID = $0 }
+        )
+    }
 
     var body: some View {
         Form {
@@ -215,22 +155,47 @@ struct RoutinesScreen: View {
                     .foregroundStyle(.secondary)
             }
             Button("Catch up now") { Task { await model.catchUp() } }
-            TextField("Id", text: $model.routineID)
-            Stepper("Every \(model.routineMinutes) minutes", value: $model.routineMinutes, in: 15...1440, step: 15)
-            TextField("Checklist", text: $model.routineChecklist, axis: .vertical)
-            Button("Save routine") { Task { await model.defineRoutine() } }
+            Section("New routine") {
+                Picker("Bot", selection: routineBot) {
+                    ForEach(model.agents) { agent in
+                        Text(agent.title).tag(agent.id)
+                    }
+                }
+                TextField("Id", text: $model.routineID)
+                Stepper("Every \(model.routineMinutes) minutes", value: $model.routineMinutes, in: 15...1440, step: 15)
+                TextField("Checklist", text: $model.routineChecklist, axis: .vertical)
+                Button("Save and run once") { Task { await model.defineRoutine() } }
+            }
             if model.routines.isEmpty {
                 Text("No routines.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(model.routines, id: \.id) { routine in
-                    VStack(alignment: .leading) {
-                        Text(routine.id.rawValue).font(.headline)
-                        Text(routine.checklist).lineLimit(3)
+                Section("Routines") {
+                    ForEach(model.routines, id: \.id) { routine in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(routine.id.rawValue).font(.headline)
+                                Spacer()
+                                Text(model.agents.first { $0.id == routine.agentID }?.title ?? "No bot")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(routine.checklist).lineLimit(3)
+                            if let result = model.routineResults[routine.id.rawValue] {
+                                Text(result)
+                                    .font(.callout)
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            Button("Run now") { Task { await model.runRoutineNow(routine.id.rawValue) } }
+                                .buttonStyle(.borderless)
+                        }
                     }
                 }
             }
         }
+        .navigationTitle("Routines")
     }
 }
 
@@ -258,54 +223,11 @@ struct MCPScreen: View {
                             Button("Connect") { Task { await model.connectServer(server) } }
                             Button("Remove") { Task { await model.removeServer(server.name) } }
                         }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
         }
-    }
-}
-
-struct ApprovalsScreen: View {
-    @Bindable var model: AssistantModel
-
-    var body: some View {
-        Group {
-            if model.inbox.isEmpty {
-                ContentUnavailableView("Nothing is waiting", systemImage: "checkmark.shield", description: Text("External effects and high-risk tools stop here. Unattended catch-up does not approve them."))
-            } else {
-                List(model.inbox) { item in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(item.prompt)
-                        Text("\(item.agentTitle) · \(item.risk)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Button("Approve") { Task { await model.decide(token: item.token, approved: true, highRisk: item.risk == "high") } }
-                            Button("Deny") { Task { await model.decide(token: item.token, approved: false, highRisk: item.risk == "high") } }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct SettingsScreen: View {
-    @Bindable var model: AssistantModel
-
-    var body: some View {
-        Form {
-            Toggle("On device only", isOn: $model.settings.onDeviceOnly)
-            Toggle("Unattended catch-up", isOn: $model.host.unattended)
-            Text("Unattended mode never auto-approves an external effect. Quiet hours are when a notification is allowed.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            TextField("Allowed from", text: $model.host.quietStart)
-            TextField("Allowed until", text: $model.host.quietEnd)
-            TextField("Time zone", text: $model.host.timeZone)
-            Stepper("At most \(model.host.dailyCap) notifications a day", value: $model.host.dailyCap, in: 0...20)
-            Button("Use on-device model") { Task { await model.useOnDeviceModel() } }
-            Button("Save settings") { Task { await model.saveSettings() } }
-        }
+        .navigationTitle("MCP servers")
     }
 }

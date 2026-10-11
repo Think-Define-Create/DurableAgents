@@ -1,42 +1,62 @@
 # DurableAgents
 
-DurableAgents is a Swift-native durable execution kernel for agent runs. The event log is the source of truth. A conversation runs under a single-owner lease, tool calls declare what kind of side effect they are, and a crash resumes from the journal instead of asking a model what happened.
+DurableAgents makes AI agent runs crash-safe on iPhone, Mac and Linux, in-process, with no server. The event log is the source of truth. A model turn and every tool call are journaled before anything runs, so a killed app resumes from the log instead of asking a model what happened, and a side effect is never sent twice by accident.
 
-The package builds and tests on Linux. The sample iOS app, Escrow Assistant, can also call Apple's on-device Foundation Models framework when the device has Apple Intelligence. That call still goes through the effect journal.
+## Why use it
+
+- **Side effects are typed.** Each tool declares `pure`, `idempotent`, `transactional` or `external`. After a crash, pure and idempotent tools run again, transactional writes commit with their result, and an external tool calls its `reconcile` hook, or waits for a person, instead of repeating. Most durable agent frameworks only offer "safe to replay or not".
+- **Approvals survive restarts.** A run suspends with a resume token, a required auth level (passcode or Face ID), and optional expiry with escalation.
+- **Private by construction.** Per-conversation AES-GCM keys wrapped by the Secure Enclave, crypto-shred, PII redaction before the seal, and a hash-chained audit export.
+- **Drop-in for Apple's models.** `DurableLanguageModelSession` wraps ordinary FoundationModels tools. It runs on the on-device model, Private Cloud Compute, or any iOS 27 `LanguageModel`.
+- **Native Swift 6**, strict concurrency, SQLite through GRDB. Per-conversation locks, so one agent never blocks another.
+- **MCP 2026-07-28** client and server, with the official Swift SDK as the fallback for older servers.
+- **Coming from pi-durable or PiDurableKit?** `durable-import` copies a pi-durable SQLite file into the event log and reports what it drops.
 
 It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT, Copyright (c) 2025 Mario Zechner). This is an original Swift redesign, not a port of that codebase, and it is not affiliated with Earendil. Do not call this product Pi.
 
 ## Layout
 
+**The durable core.** This is the product.
+
 | Target | Role |
 |---|---|
-| `DurableCore` | Event log, lease, effect journal, scripted runs, and the `ModelStep` protocol. No database and no Apple SDK. |
+| `DurableCore` | Event log, lease, effect journal, approvals, timers, retries, signals, budgets, and the `ModelStep` protocol. No database and no Apple SDK. |
 | `DurableStore` | `EventStore`: in-memory, and SQLite through [GRDB](https://github.com/groue/GRDB.swift). |
-| `DurableKit` | `@MainActor` conversation model for SwiftUI: messages, run status, pending approval, event log. Observation is used when the SDK has it. |
-| `DurableFoundationModels` | `FoundationModelsStep` when the Apple framework is present. On Linux this target is a stub. |
-| `ModelKit` | Provider streaming for Anthropic Messages, OpenAI Responses, and OpenAI-compatible chat. Keys stay in a secret store. |
+| `DurableSecurity` | Encryption at rest, Secure Enclave key wrapping, crypto-shred, redaction, retention. |
 | `AgentLoop` | Multi-step loop on the engine: one journaled model checkpoint, parallel safe tools, subagents, forks, compaction. |
-| `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
-| `Examples/EscrowAssistant` | iOS 26 SwiftUI app. Open the Xcode project and run it. |
-| `AgentAppCore` | Lumen's session, tools, inbox, and usage. No SwiftUI. Tested on Linux. |
-| `Apps/Agent` | Lumen, the multiplatform agent app. Open the Xcode project and run it. |
-| `DurableDelivery` | Journaled webhook, Slack, and APNs delivery with backoff and dead letters. |
-| `DurableMCP` | MCP client and server on the official Swift SDK (spec 2025-11-25). |
-| `mcp-fixture` | Tiny stdio MCP server the Linux tests spawn. |
-| `DurableObserve` | swift-log adapter for run, model, and effect spans. Attributes are scrubbed. |
-| `durable-audit` | CLI: hash-chain tip, verify, and JSONL/CSV audit export. |
-| `DurableImport` | One-way importer from a pi-durable SQLite file into the event log. |
-| `durable-import` | CLI for that importer. |
-| `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. No Apple imports on the Linux path. |
+| `DurableFoundationModels` | `DurableLanguageModelSession` (a crash-safe `LanguageModelSession`), `DurableTool`, and `FoundationModelsProvider` for Apple's on-device model, Private Cloud Compute, or any iOS 27 `LanguageModel`. On Linux this target is a stub. |
+| `DurableKit` | `@MainActor` conversation model for SwiftUI: messages, run status, pending approval, event log. |
+| `DurableMCP` | MCP client and server for spec 2026-07-28, with the official Swift SDK (2025-11-25) as the fallback. |
+| `durable-audit`, `DurableObserve` | Hash-chain tip, verify, and JSONL/CSV audit export. swift-log spans with scrubbed attributes. |
+| `DurableImport`, `durable-import` | One-way importer from a pi-durable SQLite file into the event log. |
+
+**Agent features** built on the core. Small and stable.
+
+| Target | Role |
+|---|---|
+| `DurableSchedule` | Routines and heartbeat. Quiet hours, catch-up, and a silent ack. |
 | `DurableIdentity` | Versioned soul, identity, user, rules, and memory digest. Agent edits stay proposals until a person approves them. |
 | `DurableSkills` | `SKILL.md` registry. Scripts are listed as text and are never executed. Agent edits stay proposals. |
-| `DurableRetrieval` | Hash embeddings, cosine, and reciprocal-rank fusion. No Apple Natural Language import. |
-| `DurableMemory` | Derived GRDB index of facts and a knowledge graph. The event log stays the source of truth. |
+| `DurableMemory`, `DurableRetrieval` | Derived index of facts and a knowledge graph. Apple sentence embeddings where available, hash embeddings elsewhere, fused with full-text rank. |
 | `DurablePolicy` | Notification quiet hours, daily cap, and dedupe. Approval rules that cannot clear an external effect while unattended. |
-| `Apps/Assistant` | Assistant, an iOS 26 / macOS 26 app. Target name `AssistantApp`. Not compiled on Linux. |
-| `DurableAgentsTests`, `DurableKitTests` | Swift Testing. Both run on Linux. |
+| `DurableDelivery` | Journaled webhook, Slack, and APNs delivery with backoff and dead letters. |
 
-Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. Escrow Assistant sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
+**Maintenance only.**
+
+| Target | Role |
+|---|---|
+| `ModelKit` | Streaming clients for Anthropic Messages, OpenAI Responses, and OpenAI-compatible chat, for Linux, servers and systems before iOS 27. Bug fixes only. On iOS 27 and macOS 27, prefer a `LanguageModel` from Apple or another package through `FoundationModelsProvider(model:)`. |
+
+**Optional app layer.**
+
+| Target | Role |
+|---|---|
+| `AgentAppKit` | The opinionated layer behind the Assistant app: one engine for many bots, built-in Calendar, Contacts and Reminders tools, bot-to-bot routing, and the small-model workarounds that app needs. Use it as a reference or skip it. No SwiftUI. Tested on Linux. |
+| `Apps/Assistant` | Assistant, an iOS 26 / macOS 26 app. Target name `AssistantApp`. Settings → Diagnostics runs one check per module on a device. Not compiled on Linux. |
+
+Test helpers: `CrashProbe` (an executable the tests kill mid-tool) and `mcp-fixture` (a tiny stdio MCP server). Tests use Swift Testing and run on Linux.
+
+Platforms for the libraries: macOS 14+, iOS 17+, and Linux. Swift 6 language mode with strict concurrency. Requires Swift 6.1 or later. GRDB 7.11 needs that toolchain. The Assistant app sets its own deployment target to iOS 26 so it can call Foundation Models. The libraries stay on the lower minimums.
 
 ## Architecture
 
@@ -117,7 +137,7 @@ Set `WebhookApprovalChannel.durable` or `PushApprovalChannel.destination` to jou
 
 `.approval(..., expiresAt:escalateTo:)` suspends until the engine clock passes `expiresAt`. `pumpTimers` and `recover` then append `approval.escalated`. With `escalateTo`, a new approval is requested for that audience and does not expire again. Without it, the run fails with `approval expired`.
 
-Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) live in the sample app. They are Apple-only and were not compiled here. `ApprovalAppleSupport` reports those imports as unavailable on Linux.
+Face ID (`LocalAuthentication`) and Live Activities (`ActivityKit`) live in the app. They are Apple-only and were not compiled here. `ApprovalAppleSupport` reports those imports as unavailable on Linux.
 
 ## Inbox
 
@@ -133,7 +153,7 @@ Face ID (`LocalAuthentication`) and the Escrow Live Activity (`ActivityKit`) liv
 
 ## Memory
 
-`DurableRetrieval` embeds text with `HashEmbedder` (`hash-v1`, a stable token hash, L2-normalized). `RetrievalMath.fuse` is reciprocal rank fusion with `k = 60`. `BruteForceVectors` is the index. Apple's `NLContextualEmbedding` is not called.
+`DurableRetrieval` embeds text with `ContextualEmbedder` (Apple's `NLContextualEmbedding`, token vectors mean-pooled and normalized) when the model is on the device, and with `HashEmbedder` otherwise, including on Linux. `Embedders.preferred()` picks one and can download the model first. Each vector records its embedder id, so `MemoryIndex.use(_:)` can switch embedders and rows made by another embedder are re-embedded, never compared. Search fuses full-text rank with vector rank through `RetrievalMath.fuse` (reciprocal rank fusion, `k = 60`), so exact names still match. `BruteForceVectors` is the index.
 
 `DurableMemory` rebuilds a GRDB file from `state.wrote` events. The sqlite file is a derived index, not a second ciphertext. Emails become `[redacted-email]` and `sk-…` tokens become `[redacted-secret]` before they are stored. Search mixes FTS5 with cosine and fuses the two lists. `memory.remember` and `memory.forget` are transactional: they return `StateWrite`s and do not write SQLite themselves. `memory.search` and `memory.open` are pure and rebuild from the log first. `shred` and `decay` journal tombstones, then rebuild.
 
@@ -147,11 +167,15 @@ When `DurableMCPServer` is created with a `MemoryIndex`, it also exposes `create
 
 `Apps/Assistant` is a multiplatform SwiftUI app. The Xcode target is `AssistantApp`. It is not part of `swift test`. Open the project on a Mac with Xcode 26. See `Apps/Assistant/UNVERIFIED.md` and `Apps/Assistant/APP_STORE.md`.
 
+`AgentAppKit` is the part that `swift test` covers: one engine for many agents, builtin tools, the approval inbox, illustrative usage, crypto-shred, and a loopback MCP listener on macOS and Linux. Settings → Diagnostics in the app runs one check per module on a device.
+
 ## Routines
 
-`DurableSchedule` journals `routine.defined`, `routine.fired`, and `routine.skipped`. A firing uses `requestID = routine:<id>:<slot>` so a second tick does not start a second run. `heartbeat.respond` (OpenClaw's `heartbeat_respond`) returns `noReply`, `notify`, or `updateChecklist`. `noReply` does not schedule a notification. Quiet hours, an empty checklist, a busy engine, a budget failure, and a too-soon event are skipped and written to the log. `runLatest` runs the newest missed slot. `skipMissed` drops a gap. `runAll` runs at most eight. The Apple wake helper is `AppleRoutineWake`, compiled only where BackgroundTasks and UserNotifications exist. It schedules a best-effort refresh. It does not promise a 30-minute cadence, and it does not call the iOS 27 `submitTaskRequest` API.
+`DurableSchedule` journals `routine.defined`, `routine.fired`, and `routine.skipped`. A firing uses `requestID = routine:<id>:<slot>` so a second tick does not start a second run. `heartbeat.respond` (OpenClaw's `heartbeat_respond`) returns `noReply`, `notify`, or `updateChecklist`. `noReply` does not schedule a notification. Quiet hours, an empty checklist, a busy engine, a budget failure, and a too-soon event are skipped and written to the log. `runLatest` runs the newest missed slot. `skipMissed` drops a gap. `runAll` runs at most eight. The Apple wake helper is `AppleRoutineWake`, compiled only where BackgroundTasks and UserNotifications exist. It schedules a best-effort refresh. It does not promise a 30-minute cadence. On iOS 27 it submits through `submitTaskRequest`, which reports every rejection, and through `submit` on earlier systems.
 
 ## Timers and retry
+
+Pass a `TimerPump` as the engine's `timers` and call `attach(engine)` after creating it. The pump fires journaled timers, such as a retry after a failed tool, while the process runs. Timers missed while the process was closed fire from `recover` and `pumpTimers`.
 
 `RetryPolicy` is stored on `run.started`. `stub` allows one attempt, so a thrown tool error still fails the run. That is still the engine default. `RetryPolicy.standard` is the opt-in schedule: five attempts, half a second doubling, 20% jitter. A policy with more attempts retries `pure`, `idempotent`, and `transactional` tools with exponential backoff and optional jitter, and journals `effect.retry` plus a timer. `external` is never retried automatically; recovery still calls `reconcile`. A tool that throws `DeliveryRetry` is the exception: a retryable failure uses the run's schedule (or the receiver's `Retry-After`), and a non-retryable failure or an exhausted schedule writes `delivery.deadLettered`.
 
@@ -173,7 +197,11 @@ APNs uses token auth. The JWT header is `alg` `ES256` and `kid`. The claims are 
 
 ## MCP
 
-`DurableMCP` uses the official [Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) (package `swift-sdk`, product `MCP`, resolved at 0.12.1). New contributions to that SDK are Apache 2.0; existing code is MIT. The protocol version this SDK implements, and the current spec, is **2025-11-25**. DurableAgents does not add protocol fields. Tool annotations it reads are the spec fields `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` (plus `title` on the tool). `openWorldHint` is stored and does not pick an effect kind.
+`DurableMCP` speaks MCP **2026-07-28** natively and keeps the official [Swift SDK](https://github.com/modelcontextprotocol/swift-sdk) (package `swift-sdk`, product `MCP`, 2025-11-25) as a fallback for older servers. With `protocolVersion: "automatic"` (the default) the client probes with `server/discover`. A modern server is then used statelessly: every request carries the protocol version, `clientInfo` and `clientCapabilities` in `_meta`, and HTTP POSTs send `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers. If the probe gets a reply that is not a recognized modern error, the client falls back to the SDK's `initialize` handshake.
+
+`tools/call`, `resources/read` and `prompts/get` follow multi round-trip requests: an `input_required` result is answered through an `MCPInputHandler` (elicitation only; sampling and roots are deprecated and not offered), and the retry echoes `requestState`. List and read results are cached for `ttlMs` and invalidated by events from `subscriptions/listen` (`MCPClientSession.listen`). With the tasks extension, a task result is polled with `tasks/get`. With an `MCPTaskJournal` the task id is recorded before polling, so a crash resumes polling the same task instead of calling the tool again, and a task waiting on input after a crash suspends the run for a person. Every tool call sends `_meta["dev.durableagents/idempotencyKey"]`, a hash of the engine effect key that is the same on every retry. The spec defines no idempotency field, so a server has to opt in to deduplicate on it.
+
+Not covered yet: OAuth, completion, progress and log notifications, the deprecated HTTP+SSE transport, MCP Apps, and resources or prompts served by `DurableMCPServer`.
 
 | Hint | Effect | Approval |
 |---|---|---|
@@ -190,7 +218,7 @@ Auth is secret-account names: `envSecrets` for stdio environment variables, `hea
 
 stdio uses `Foundation.Process` on macOS and Linux. It is not available on iOS (`MCPPlatform.stdioAvailable`). Streamable HTTP is a JSON POST through `HTTPClientTransport` with SSE turned off, so the same client runs on Linux and on iOS. The SDK's SSE client is compiled only off Linux and was not exercised here (`MCPPlatform.sseStreamingCompiled` is false on Linux). Calls check cancellation, honor `timeoutSeconds`, and open one new connection after an MCP `connectionClosed` error. Other MCP errors are not retried. SDK failures are rethrown as `MCPCallError` with a fixed sentence so a URL or token in `localizedDescription` cannot reach the journal.
 
-`DurableMCPServer` exposes the engine to other clients (Claude, Cursor, a LangGraph back office). Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`, `approve`, `reject`, `export_audit`. Pass a `MemoryIndex` to also expose the knowledge-graph tools (`create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, `open_nodes`). `approve` and `reject` require `approverId` and `authLevel` (`anonymous`, `session`, `devicePasscode`, `biometric`). The server allowlist is a set of approver ids; an empty set refuses every approval. The engine still rejects an auth level below the approval's requirement. `export_audit` is `AuditExport.jsonl`, which omits message text and tool arguments. stdio and stateless streamable HTTP (POST JSON, GET 405) are both wired. Do not call this server from a tool on the same engine. The tool runs while the engine holds its lock.
+`DurableMCPServer` answers both eras: `server/discover` and stateless 2026-07-28 requests, and the SDK's `initialize`. It exposes the engine to other clients (Claude, Cursor, a LangGraph back office). Tools: `start_run`, `send_message`, `get_run_status`, `list_pending_approvals`, `approve`, `reject`, `export_audit`. Pass a `MemoryIndex` to also expose the knowledge-graph tools (`create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `read_graph`, `search_nodes`, `open_nodes`). `approve` and `reject` require `approverId` and `authLevel` (`anonymous`, `session`, `devicePasscode`, `biometric`). The server allowlist is a set of approver ids; an empty set refuses every approval. The engine still rejects an auth level below the approval's requirement. `export_audit` is `AuditExport.jsonl`, which omits message text and tool arguments. stdio and stateless streamable HTTP (POST JSON, GET 405) are both wired. Do not call this server from a tool on the same engine. The tool runs while the engine holds its lock.
 
 ### MCP security
 
@@ -202,15 +230,42 @@ Keep a per-server allowlist. Do not point a run at a server and expose every too
 
 `ModelStep.plan` returns the same step vocabulary as a script: assistant text, a tool call, an approval, or finish. `ScriptedModelStep` walks a fixed list. `submitTurn` is the model-driven entry point. `submit(Submission)` is unchanged.
 
-`FoundationModelsStep` is compiled only when `FoundationModels` is importable, and its initializer is `@available(iOS 26, macOS 26, *)`. It opens a `LanguageModelSession` with capturing tools. Those tools record the arguments and throw before any side effect. The session surfaces that as `LanguageModelSession.ToolCallError`, and the engine then journals `effect.intent` and runs the real DurableAgents tool. A crash still reconciles from the journal, not from the model.
+`FoundationModelsProvider` is compiled only when `FoundationModels` is importable. It opens a `LanguageModelSession` with capturing tools. Those tools record the arguments and throw before any side effect. The session surfaces that as `LanguageModelSession.ToolCallError`, and the engine then journals `effect.intent` and runs the real DurableAgents tool. A crash still reconciles from the journal, not from the model.
 
-Each plan uses a new session. The prompt is rebuilt from the durable transcript, because a tool error rolls the Foundation Models transcript back. Check `SystemLanguageModel.default.availability` before using it. `.available` uses the on-device model. `.unavailable(.appleIntelligenceNotEnabled)`, `.unavailable(.deviceNotEligible)`, `.unavailable(.modelNotReady)`, and any other unavailable reason fall back to a scripted model. Escrow Assistant uses `EscrowScriptedModel` for that fallback, and also when the process is launched with `-UseScriptedModel`.
+On iOS 27 and macOS 27, `FoundationModelsProvider(model:instructions:)` takes any `LanguageModel`, so a third-party model that conforms to Apple's protocol runs through the same durable loop. Those larger models get the history as a structured `Transcript` (prompts, responses, tool calls, tool outputs). Apple's small on-device model keeps a flat "role: text" prompt, because in testing on macOS 27 it called tools more reliably that way.
+
+### Drop-in durable session
+
+`DurableLanguageModelSession` wraps an ordinary FoundationModels tool set so a chat survives a crash:
+
+```swift
+let session = try await DurableLanguageModelSession(
+    store: try SQLiteEventStore(path: url.path),
+    instructions: "You save notes when asked.",
+    tools: [DurableTool(SaveNote(), effect: .external, requiresApproval: true)]
+)
+_ = try await session.recover()   // at launch: finish an interrupted turn, report a pending approval
+switch try await session.respond(to: "Save a note that says buy milk.") {
+case .text(let reply): print(reply)
+case .needsApproval(let prompt, let token): // ask the person, then
+    _ = try await session.approve(token)
+case .retrying, .failed: break
+}
+```
+
+`DurableTool` keeps your tool's name, description and `@Generable` arguments, and adds the effect kind, approval, and reconcile hook. The tool body runs only after the engine has journaled the call, so a killed app does not send twice. If the model declines to word a reply after a tool succeeded (the on-device guardrail sometimes does), the session answers with the tool's own result.
+
+Each plan uses a new session. The prompt is rebuilt from the durable transcript, because a tool error rolls the Foundation Models transcript back. Check `SystemLanguageModel.default.availability` before using it. `.available` uses the on-device model. `.unavailable(.appleIntelligenceNotEnabled)`, `.unavailable(.deviceNotEligible)`, `.unavailable(.modelNotReady)`, and any other unavailable reason fall back to a scripted model. `ScriptedModelStep` is the scripted fallback.
 
 ### On-device limits
 
-Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. Escrow Assistant keeps the instructions short, sends three tools, and only the last 12 transcript lines (each truncated) into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device. This sample does not call Private Cloud Compute.
+Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. `FoundationModelsProvider` keeps the instructions short and sends only the most recent messages, clipped to a character budget, into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device.
+
+On iOS 27 and macOS 27, `FoundationModelsProvider(privateCloud: true)` runs on Apple's `PrivateCloudComputeLanguageModel` instead. The prompt budget follows that model's `contextSize`, so more history fits. The request leaves the device, so `OnDevicePolicy.blocksCloud` treats `ProviderChoice.applePrivateCloud` as a cloud choice. It needs Apple's managed `com.apple.developer.private-cloud-compute` entitlement, which a developer requests from Apple. Without it the framework stops the process with a fatal error rather than throwing, so the provider only calls it when the app's Info.plist sets `DurableAgentsPrivateCloudEntitled` to true, and otherwise stays on device. `FoundationModelsSupport.privateCloudAvailable` checks that key and whether the model can answer now.
 
 ## Model providers (`ModelKit`)
+
+ModelKit is in maintenance: bug fixes only, no new providers or request features. It exists for Linux, servers, and systems before iOS 27. On iOS 27 and macOS 27, Apple's `LanguageModel` protocol is the integration point: pass any conforming model to `FoundationModelsProvider(model:instructions:)` or `DurableLanguageModelSession(store:model:instructions:tools:)`.
 
 `ModelKit` does not import the durable kernel. A `ModelProvider` yields `ModelStreamEvent` values (`textDelta`, `thinkingDelta`, `toolCallDelta`, `toolCall`, `usage`, `stop`). Token deltas stay in memory. `complete` folds them into one `ProviderTurn`, which is the checkpoint a durable loop should journal.
 
@@ -228,11 +283,13 @@ API keys are `SecretReference` values (an account name), resolved by `SecretStor
 
 When the prompt grows past `compactAfterMessages`, the step journals `context.compacted` with a model-written summary. The original messages stay in the log. Later prompts see the summary plus the most recent messages.
 
-`FoundationModelsProvider` adapts Apple's on-device `LanguageModelSession.respond(to:)` to the same `ModelProvider` loop. It is compiled only when Foundation Models is available. This environment did not compile it. Partial token streaming from that framework is not wired.
+`FoundationModelsProvider` adapts Apple's `LanguageModelSession.streamResponse(to:)` to the same `ModelProvider` loop. Each snapshot is sent as a text delta, so the reply shows while the model generates. It is compiled only when Foundation Models is available. The cloud providers stream server-sent events as they arrive. `PublishingProvider` copies text deltas into `LiveTranscript` for the UI. Only the finished turn is journaled.
 
 ## Security (`DurableSecurity`)
 
-`EncryptingEventStore` wraps any `EventStore`. It redacts payloads, then seals them with AES-GCM (swift-crypto, the same API as CryptoKit). The engine and `read` see plaintext. The inner log stores ciphertext. Keys come from `ConversationKeyProvider` (`MemoryKeyProvider`, `FileKeyProvider`, and `KeychainKeyProvider` where Security is available). `shred` deletes the key so the ciphertext cannot be opened.
+`EncryptingEventStore` wraps any `EventStore`. It redacts payloads, then seals them with AES-GCM (swift-crypto, the same API as CryptoKit). The engine and `read` see plaintext. The inner log stores ciphertext. Keys come from `ConversationKeyProvider` (`MemoryKeyProvider`, `FileKeyProvider`, and `KeychainKeyProvider` and `SecureEnclaveKeyProvider` where Security is available). `shred` deletes the key so the ciphertext cannot be opened.
+
+`SecureEnclaveKeyProvider` stores each conversation key wrapped by a P-256 key that lives in the Secure Enclave: an ephemeral P-256 key, ECDH, HKDF-SHA256 with the conversation scope as info, then AES-GCM. The enclave key needs no user presence and is readable after first unlock, so background wakes still decrypt while the phone is locked. A plain key from `KeychainKeyProvider` is wrapped in place on first read, or all at once with `wrapExistingKeys()`, and keeps its bytes. A wrapped item that does not open throws `keyUnavailable`. It is never replaced with a new key. Without an enclave (simulator, Linux) it behaves like `KeychainKeyProvider`.
 
 `BuiltInRedactor` runs before that seal. It matches SSNs, Luhn-valid card numbers, labeled account and routing numbers, emails, phone numbers, `Authorization: Bearer` values, `sk-` tokens, and `x-api-key` values. Extra patterns can be added. With a `TokenVault`, the replacement is a token and the secret stays in the vault, not the log.
 
@@ -260,54 +317,22 @@ User, assistant, and tool-result entries become `message.appended`. Compaction b
 
 `ConversationModel` is a `@MainActor` class. When the Observation module is present it is also `@Observable`. It exposes `messages`, `status` (`idle`, `running`, `suspendedForApproval`, `failed`, `done`), `pendingApproval`, the `events` array, and `eventLog` (an `AsyncStream` of envelopes observed after the model is opened). `send` starts a model turn. `approve` and `reject` resume the pending token. `recoverOnLaunch` continues a running journal and reloads a suspended one. `close` drops the lease, which in-process tests need because the pid is still alive.
 
-## Escrow Assistant
-
-Open `Examples/EscrowAssistant/EscrowAssistant.xcodeproj` in **Xcode 26** and press Run. The scheme builds the local package. No generator step.
-
-Use an **iOS 26** device, or an iOS 26 Simulator with Apple Intelligence enabled (Settings, Apple Intelligence and Siri, on a Mac that supports it). The first launch asks for notification permission so an approval can also arrive as an actionable local notification.
-
-The app stores `escrow.sqlite` in Application Support (`EscrowAssistant/`). The chat can:
-
-- **Look up 14 Harbor Lane.** Pure tool `lookupProperty` against a fake property book.
-- **Send the buyer an email.** External tool `sendEmail`. The body writes a fake outbox file, then returns. Recovery calls `reconcile` and does not write a second receipt when the outbox already has that effect key.
-- **Schedule Friday's closing.** The run suspends for approval (`closing`). Approve or reject from the in-app banner or from the notification actions. After approval, idempotent `scheduleClosing` writes a fake calendar entry.
-
-The status line shows the planner. The provider menu chooses Apple on-device, Anthropic, OpenAI, or the scripted planner. Anthropic and OpenAI go through `AgentLoop` and `ModelKit`. The key is a Keychain account (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), not a value in the log. Apple on-device uses `AgentLoopStep` with `FoundationModelsProvider` when that framework is available. The scripted planner is the default, and `-UseScriptedModel` forces it. `scheduleClosing` waits for a high-risk approval before the tool runs.
-
-The journal file is encrypted at rest with `EncryptingEventStore` and `BuiltInRedactor`. On Apple the data key is in the Keychain. The Event log screen lists the journal as the app sees it, which is plaintext after the wrapper decrypts.
-
-**MCP** in the toolbar saves optional server configs to `EscrowAssistant/mcp-servers.json`. Each entry is an `MCPServerConfig`: name, `stdio` or `http`, command or URL, an allowlist, and secret-account names for an environment variable or a header. The file stores account names, never secret values. An empty allowlist exposes no tools. This screen does not dial the server and does not add the remote tools to the chat. A host that wants them calls `MCPClientSession.connect` and `MCPToolBridge.makeTools`. stdio is saved for a Mac or Linux host; this iOS build cannot launch a subprocess. Destructive and hint-less MCP tools still require approval before they run, and tool descriptions from a server are untrusted. See MCP security above. This screen was not compiled or opened here.
-
-### Crash demo
-
-1. Tap **Crash now**. That arms a flag and submits a scripted `sendEmail` turn, so the demo does not depend on the model choosing the tool.
-2. The engine commits `effect.intent`, the tool writes the outbox, then the process is killed (`SIGKILL`) before `effect.result`.
-3. Relaunch the app from Xcode. `recoverOnLaunch` steals the lease because the old pid is dead, sees the intent, reconciles against the outbox, and finishes the script. The banner reads that the email was recovered and not sent twice. The transcript shows one tool receipt.
-
-If you run the UI tests (`EscrowAssistantUITests`), pass `-ResetJournal` on the first launch so a previous simulator install does not leave extra receipts. The crash test does that, then relaunches without resetting so recovery can see the journal. Those tests were not executed in this environment.
-
-## Lumen
-
-Open `Apps/Agent/Lumen.xcodeproj` in Xcode 26 and press Run. The product name is Lumen. Architecture, the screen-to-package map, entitlements, and the first-run checklist are in `Apps/Agent/README.md` and `Apps/Agent/TESTING.md`. Apple-only calls that were not compiled here are listed in `Apps/Agent/UNVERIFIED.md`.
-
-`AgentAppCore` is the part that `swift test` covers: one engine for many agents, builtin tools, the approval inbox, illustrative usage, crypto-shred, and a loopback MCP listener on macOS and Linux.
-
 ## Build and test on a Mac
 
-Install a Swift 6.1+ toolchain. Xcode 26 is required to compile Escrow Assistant, Lumen, and Foundation Models. The package tests do not need that SDK:
+Install a Swift 6.1+ toolchain. Xcode 26 is required to compile the Assistant app and Foundation Models. The package tests do not need that SDK:
 
 ```bash
 swift test
 swift build
 ```
 
-`swift test` builds `CrashProbe`, kills it mid-tool, and recovers that SQLite file in the test process. It also restarts a second process for approval suspend and resume, and it runs the DurableKit tests against `ScriptedModelStep` and `EscrowScriptedModel`.
+`swift test` builds `CrashProbe`, kills it mid-tool, and recovers that SQLite file in the test process. It also restarts a second process for approval suspend and resume, and it runs the DurableKit tests against `ScriptedModelStep` and a scripted escrow planner kept in the tests.
 
-To run the package suite in Xcode, open `Package.swift`, wait for package resolution, and choose **Product > Test**. To run the sample, open `Examples/EscrowAssistant/EscrowAssistant.xcodeproj` instead.
+To run the package suite in Xcode, open `Package.swift`, wait for package resolution, and choose **Product > Test**. To run the app, open `Apps/Assistant/Assistant.xcodeproj` instead.
 
 Formatting is [swift-format](https://github.com/swiftlang/swift-format) with the `.swift-format` file in the repo root. SwiftLint is not used. No GitHub Actions workflow is required to build or test.
 
-On Linux, install `libsqlite3-dev`, a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
+On Linux, install `libsqlite3-dev`, `sqlite3` (the importer tests use it), a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
 
 ```bash
 swift run durable-audit tip --database events.sqlite
@@ -358,7 +383,8 @@ SQLite is `try SQLiteEventStore(path: "agent.sqlite")`. The same `Engine` API ta
 These follow the redesign notes, not a table-compatible port of Pi Durable:
 
 - The journal is the source of truth. `durable-import` copies a pi-durable SQLite file in one direction and reports what it drops. The tables are not the runtime format.
-- The fence is store-wide. One actor serializes runs. Per-conversation commit lines and group commit are later work.
+- The fence is store-wide. Each conversation has its own lock inside the engine, so one agent's model call or tool body does not hold up another agent. Recovery, timer pumps and signals take every lock. Reads and single appends take none. A subagent call never waits for another conversation's lock: a busy target answers that it is busy, so two agents asking each other cannot deadlock. Group commit is later work.
+- The engine keeps its folded view of the log in memory and reads only events after the last one it applied (`EventStore.readAll(after:)`), so a step costs what changed rather than the whole history. Through `EncryptingEventStore` that also means only new events are decrypted. A `retention.purged` event makes it refold from the start, and a new engine folds the log once at open. `Engine.reloadState()` drops the fold after stored events change outside the engine.
 - Transactional tools do not run inside an open SQLite transaction callback. Their writes are returned to the engine and committed with the result, which is the atomic boundary.
 - Encryption, redaction, and retention wrap the log. Tracing is a hook, not an OpenTelemetry SDK export.
 - Transcript messages are a small versioned JSON shape owned here. They are not the Pi message schema.

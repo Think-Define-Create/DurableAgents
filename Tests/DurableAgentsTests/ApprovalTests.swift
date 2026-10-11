@@ -76,3 +76,49 @@ func approvalSurvivesEngineRestartAndResumes(_ kind: StoreKind) async throws {
     #expect(still.run?.status == .suspended)
     await engine.close()
 }
+
+/// Asks for one journaled notification per approval.
+private struct JournaledNotify: ApprovalChannel {
+    func deliver(_ notice: ApprovalNotice) async {}
+
+    func journaledDeliveries(for notice: ApprovalNotice) -> [JournaledDelivery] {
+        [JournaledDelivery(id: "notify-\(notice.approvalID)", toolName: "notify.person", arguments: .object(["token": .string(notice.token)]))]
+    }
+}
+
+/// The approval is journaled but the process dies before its notification is sent. Here the first
+/// engine has no `notify.person` tool, so the delivery never leaves memory, which is the same gap.
+/// Recovery must send it once, and the run must still resume.
+@Test(arguments: [StoreKind.memory, StoreKind.sqlite])
+func anApprovalWhoseNotificationWasLostIsSentOnRecovery(_ kind: StoreKind) async throws {
+    let harness = try makeHarness(kind)
+    let first = try await Engine(store: harness.store, clock: harness.clock, approvals: JournaledNotify(), leaseTTL: .seconds(3600))
+    let result = try await first.submit(Submission(
+        requestID: "r1",
+        text: "Send the wire",
+        script: Script(steps: [
+            .approval(id: "wire-ok", prompt: "Send the wire?"),
+            .finish("done"),
+        ])
+    ))
+    let token = try #require(result.resumeToken)
+    await first.close()
+
+    let sent = Recorder()
+    let notify = Tool(name: "notify.person", effect: .external, summary: "notify", reconcile: { _, _ in .notDone }) { _, context in
+        await sent.add(context)
+        return ToolReturn(output: .string("sent"))
+    }
+    let second = try await Engine(store: harness.store, tools: [notify], clock: harness.clock, approvals: JournaledNotify(), leaseTTL: .seconds(3600))
+    let recovered = try await second.recover()
+    #expect(recovered.first?.resumeToken == token)
+    #expect(await sent.calls.count == 1)
+
+    // A second recovery does not notify again.
+    _ = try await second.recover()
+    #expect(await sent.calls.count == 1)
+
+    let resumed = try await second.resume(token: token, decision: .approved)
+    #expect(resumed.finalText == "done")
+    await second.close()
+}

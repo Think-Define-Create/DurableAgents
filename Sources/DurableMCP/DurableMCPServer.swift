@@ -14,18 +14,24 @@ import MCP
 /// `approve` and `reject` require `approverId` and `authLevel`. An empty approver allowlist
 /// refuses every approval. The engine still checks that the auth level meets the approval.
 /// Do not call this server from a tool on the same engine; that deadlocks the single-owner actor.
+///
+/// The server is dual-era. A request with 2026-07-28 `_meta`, or `server/discover`, is served
+/// statelessly by this package. An `initialize` request is served by the SDK under 2025-11-25.
 public actor DurableMCPServer {
+    private static let instructions = "Drive a durable run. approve and reject require approverId and authLevel. An empty approver allowlist refuses every approval."
     private let operations: MCPServerOperations
+    private let modern: MCPModernResponder
     private let server: Server
     private let http: StatelessHTTPServerTransport
     private var started = false
 
     public init(engine: Engine, store: any EventStore, approverIDs: Set<String>, memory: MemoryIndex? = nil) {
         operations = MCPServerOperations(engine: engine, store: store, approverIDs: approverIDs, memory: memory)
+        modern = MCPModernResponder(operations: operations, instructions: Self.instructions)
         server = Server(
             name: "DurableAgents",
             version: "1.0.0",
-            instructions: "Drive a durable run. approve and reject require approverId and authLevel. An empty approver allowlist refuses every approval.",
+            instructions: Self.instructions,
             capabilities: .init(tools: .init(listChanged: false))
         )
         http = StatelessHTTPServerTransport()
@@ -50,17 +56,85 @@ public actor DurableMCPServer {
         if started {
             throw MCPCallError("mcp server is already started")
         }
-        try await server.start(transport: transport)
+        try await server.start(transport: MCPDualEraTransport(inner: transport, responder: modern))
         started = true
     }
 
+    /// Starts the server on an in-memory transport and returns a client connected to it.
+    /// For in-app diagnostics and tests, where no process can be spawned and no port opened.
+    public func loopbackClient() async throws -> MCPClientSession {
+        let (client, server) = await InMemoryTransport.createConnectedPair()
+        try await start(transport: server)
+        return try await MCPClientSession.connected(client)
+    }
+
+    /// A 2026-07-28 client on an in-process channel. No SDK handshake, process, or port.
+    public func modernLoopbackClient(inputHandler: (any MCPInputHandler)? = nil) async throws -> MCPClientSession {
+        let connection = MCPModernConnection(
+            channel: MCPInProcessChannel(responder: modern),
+            server: "loopback",
+            inputHandler: inputHandler,
+            timeout: 30
+        )
+        try await connection.discover()
+        return MCPClientSession(modern: connection, server: "loopback", timeoutSeconds: 30)
+    }
+
+    /// Dual-era Streamable HTTP with full-fidelity modern error bodies (`data.supported` and so on).
+    public func respond(_ request: HTTPRequest) async -> MCPHTTPReply {
+        if let message = modernMessage(request) {
+            return await modern.respond(message, headers: request.headers)
+        }
+        let response = await http.handleRequest(request)
+        switch response {
+        case .stream(let stream, let headers):
+            return MCPHTTPReply(status: response.statusCode, headers: headers, stream: stream)
+        default:
+            return MCPHTTPReply(status: response.statusCode, headers: response.headers, body: response.bodyData)
+        }
+    }
+
+    /// Dual-era Streamable HTTP in the SDK's response type. A modern error keeps its code and
+    /// message; `data` does not fit `HTTPResponse.error`, so use `respond` when that matters.
     public func handleHTTP(_ request: HTTPRequest) async -> HTTPResponse {
-        await http.handleRequest(request)
+        guard let message = modernMessage(request) else {
+            return await http.handleRequest(request)
+        }
+        let reply = await modern.respond(message, headers: request.headers)
+        if reply.status == 202 {
+            return .accepted()
+        }
+        if let stream = reply.stream {
+            return .stream(stream, headers: reply.headers)
+        }
+        let body = reply.body ?? Data()
+        if reply.status >= 400, let parsed = try? MCPWire.parse(body), let error = MCPRPCError(parsed["error"], httpStatus: reply.status) {
+            return .error(statusCode: reply.status, .serverError(code: error.code, message: error.message))
+        }
+        return .data(body, headers: reply.headers)
     }
 
     public func stop() async {
+        modern.closeSubscriptions()
         await server.stop()
         started = false
+    }
+
+    private func modernMessage(_ request: HTTPRequest) -> JSONValue? {
+        guard request.method.uppercased() == "POST",
+              let body = request.body,
+              let message = try? MCPWire.parse(body),
+              message["method"]?.stringValue != "initialize"
+        else {
+            return nil
+        }
+        if MCPModernResponder.isModern(message) {
+            return message
+        }
+        if let version = request.header("MCP-Protocol-Version"), MCPProtocol.modernVersions.contains(version) {
+            return message
+        }
+        return nil
     }
 
     private func install() async throws {
@@ -74,7 +148,7 @@ public actor DurableMCPServer {
     }
 }
 
-private final class MCPServerOperations: Sendable {
+final class MCPServerOperations: Sendable {
     private let engine: Engine
     private let store: any EventStore
     private let approverIDs: Set<String>

@@ -39,9 +39,13 @@ public struct MemoryEdge: Sendable, Equatable {
 
 /// Derived GRDB graph. The event log is the source of truth. Rebuild drops the tables and folds the log again.
 /// The sqlite file is not a second ciphertext. Put it in the same container as the encrypted event store.
+///
+/// Each vector row records the embedder id that made it. A rebuild reuses a stored vector only when the
+/// text and that id both match, and search re-embeds any row made by another embedder before it compares
+/// vectors. Search fuses full-text rank with vector rank, so exact names and close meanings both match.
 public actor MemoryIndex {
     private let path: String
-    private let embedder: any Embedder
+    private var embedder: any Embedder
     private let db: DatabaseQueue
 
     public init(path: String, embedder: any Embedder) throws {
@@ -79,11 +83,19 @@ public actor MemoryIndex {
         }
     }
 
+    /// The id of the embedder new vectors are made with.
+    public var embedderID: String { embedder.id }
+
+    /// Switches embedders, for example when a sentence model finishes downloading. Rows made by the old
+    /// one are re-embedded on the next search or rebuild. Their vectors are never compared across models.
+    public func use(_ embedder: any Embedder) {
+        self.embedder = embedder
+    }
+
     public func rebuild(from store: any EventStore) async throws {
         let events = try await store.readAll()
         let embedder = self.embedder
         var items: [String: MemoryRecord] = [:]
-        var vectors: [String: [Float]] = [:]
         var entities: [String: MemoryEntity] = [:]
         var edges: [String: MemoryEdge] = [:]
         var goneItems: Set<String> = []
@@ -103,9 +115,7 @@ public actor MemoryIndex {
                     importance: (try? jsonDouble(value["importance"])) ?? 0.5,
                     modelID: embedder.id
                 )
-                let vector = try await embedder.embed([text])
                 items[key] = record
-                vectors[key] = vector.first ?? []
                 goneItems.remove(key)
             case "memory.tombstone":
                 goneItems.insert(key)
@@ -129,6 +139,21 @@ public actor MemoryIndex {
         for name in goneEntities {
             entities.removeValue(forKey: name)
             edges = edges.filter { $0.value.from != name && $0.value.to != name }
+        }
+        let cached = try await db.read { database in try Self.storedVectors(database) }
+        var vectors: [String: [Float]] = [:]
+        var missing: [String] = []
+        for (id, record) in items {
+            if let stored = cached[id], stored.text == record.text, stored.modelID == embedder.id {
+                vectors[id] = stored.vector
+            } else {
+                missing.append(id)
+            }
+        }
+        missing.sort()
+        let fresh = try await embedder.embed(missing.map { items[$0]?.text ?? "" })
+        for (id, vector) in zip(missing, fresh) {
+            vectors[id] = vector
         }
         let itemRows = items
         let vectorRows = vectors
@@ -168,7 +193,9 @@ public actor MemoryIndex {
     }
 
     public func search(_ query: String, limit: Int = 5) async throws -> [MemoryRecord] {
+        try await reembedStale()
         let redacted = MemoryRedaction.redact(query)
+        let embedder = self.embedder
         let queryVector = try await embedder.embed([redacted]).first ?? []
         return try await db.read { database in
             let fts = try Row.fetchAll(database, sql: """
@@ -176,7 +203,7 @@ public actor MemoryIndex {
                 """, arguments: [Self.ftsQuery(redacted), limit])
             let lexical = fts.compactMap { $0["item_id"] as String? }
             var rows: [(String, [Float])] = []
-            let all = try Row.fetchAll(database, sql: "SELECT id, vector FROM memory_item")
+            let all = try Row.fetchAll(database, sql: "SELECT id, vector FROM memory_item WHERE model_id = ?", arguments: [embedder.id])
             for row in all {
                 guard let id: String = row["id"], let blob: Data = row["vector"] else { continue }
                 rows.append((id, Self.floats(blob)))
@@ -191,6 +218,28 @@ public actor MemoryIndex {
                 }
             }
             return found
+        }
+    }
+
+    /// Re-embeds rows whose vectors came from a different embedder than the current one.
+    private func reembedStale() async throws {
+        let embedder = self.embedder
+        let stale = try await db.read { database in
+            try Row.fetchAll(database, sql: "SELECT id, text FROM memory_item WHERE model_id != ? ORDER BY id", arguments: [embedder.id])
+                .compactMap { row -> (String, String)? in
+                    guard let id: String = row["id"], let text: String = row["text"] else { return nil }
+                    return (id, text)
+                }
+        }
+        guard !stale.isEmpty else { return }
+        let vectors = try await embedder.embed(stale.map(\.1))
+        try await db.write { database in
+            for ((id, _), vector) in zip(stale, vectors) {
+                try database.execute(
+                    sql: "UPDATE memory_item SET model_id = ?, vector = ? WHERE id = ?",
+                    arguments: [embedder.id, Self.blob(vector), id]
+                )
+            }
         }
     }
 
@@ -401,6 +450,16 @@ public actor MemoryIndex {
         )
     }
 
+    private static func storedVectors(_ database: Database) throws -> [String: (text: String, modelID: String, vector: [Float])] {
+        var stored: [String: (text: String, modelID: String, vector: [Float])] = [:]
+        for row in try Row.fetchAll(database, sql: "SELECT id, text, model_id, vector FROM memory_item") {
+            guard let id: String = row["id"], let text: String = row["text"], let modelID: String = row["model_id"],
+                  let blob: Data = row["vector"] else { continue }
+            stored[id] = (text, modelID, floats(blob))
+        }
+        return stored
+    }
+
     private static func blob(_ vector: [Float]) -> Data {
         var copy = vector
         return Data(bytes: &copy, count: copy.count * MemoryLayout<Float>.size)
@@ -415,11 +474,21 @@ public actor MemoryIndex {
         return vector
     }
 
+    /// Words joined with OR. Common English words are dropped so "is" or "the" does not outrank meaning.
     private static func ftsQuery(_ text: String) -> String {
-        let tokens = text.split { !$0.isLetter && !$0.isNumber }.map { "\"\($0)\"" }
+        let words = text.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        let kept = words.filter { !stopwords.contains($0.lowercased()) }
+        let tokens = (kept.isEmpty ? words : kept).map { "\"\($0)\"" }
         if tokens.isEmpty { return "\"\"" }
         return tokens.joined(separator: " OR ")
     }
+
+    private static let stopwords: Set<String> = [
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "do", "does", "for", "from", "has", "have",
+        "he", "her", "his", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "our", "she", "so",
+        "that", "the", "their", "them", "they", "this", "to", "was", "we", "were", "what", "when", "where",
+        "which", "who", "why", "will", "with", "you", "your",
+    ]
 }
 
 private func jsonDouble(_ value: JSONValue?) throws -> Double {

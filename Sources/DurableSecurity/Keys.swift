@@ -5,6 +5,8 @@ public enum SecurityError: Error, Sendable, Equatable, CustomStringConvertible {
     case missingKey(String)
     case shredded(String)
     case malformedCiphertext(String)
+    /// The key exists but cannot be read right now, for example before the first unlock after a restart.
+    case keyUnavailable(String, Int32)
 
     public var description: String {
         switch self {
@@ -14,6 +16,8 @@ public enum SecurityError: Error, Sendable, Equatable, CustomStringConvertible {
             return "key shredded \(id)"
         case .malformedCiphertext(let detail):
             return "malformed ciphertext: \(detail)"
+        case .keyUnavailable(let id, let status):
+            return "key \(id) is unavailable right now (status \(status))"
         }
     }
 }
@@ -126,71 +130,21 @@ enum AESGCM {
         return combined
     }
 
-    static func open(_ combined: Data, key: Data) throws -> Data {
+    static func open(_ combined: Data, key: Data, scope: String = "") throws -> Data {
         let symmetric = SymmetricKey(data: key)
-        let box = try AES.GCM.SealedBox(combined: combined)
-        return try AES.GCM.open(box, using: symmetric)
+        let box: AES.GCM.SealedBox
+        do {
+            box = try AES.GCM.SealedBox(combined: combined)
+        } catch {
+            throw SecurityError.malformedCiphertext("sealed box: \(error)")
+        }
+        do {
+            return try AES.GCM.open(box, using: symmetric)
+        } catch {
+            // A provider that makes a fresh key for a missing scope (the Keychain does) hands back
+            // a key the ciphertext was not sealed with. The original key is gone, so this is a shred.
+            throw SecurityError.shredded(scope)
+        }
     }
 }
 
-#if canImport(Security)
-import Security
-
-/// Keychain item per conversation scope. Not compiled on Linux.
-/// Keys are cached after the first lookup, because every event read or written needs one
-/// and each Keychain query is a round trip to the security daemon.
-public actor KeychainKeyProvider: ConversationKeyProvider {
-    public let service: String
-    private var cache: [String: Data] = [:]
-
-    public init(service: String = "DurableAgents.keys") {
-        self.service = service
-    }
-
-    public func loadKey(for scope: String) async throws -> Data {
-        if let cached = cache[scope] {
-            return cached
-        }
-        let key = try fetchOrCreate(scope)
-        cache[scope] = key
-        return key
-    }
-
-    private func fetchOrCreate(_ scope: String) throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: scope,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess, let data = item as? Data, data.count == 32 {
-            return data
-        }
-        let created = MemoryKeyProvider.randomKey()
-        let insert: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: scope,
-            kSecValueData as String: created,
-        ]
-        let write = SecItemAdd(insert as CFDictionary, nil)
-        guard write == errSecSuccess else {
-            throw SecurityError.missingKey(scope)
-        }
-        return created
-    }
-
-    public func shred(_ scope: String) async throws {
-        cache.removeValue(forKey: scope)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: scope,
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-}
-#endif
