@@ -1,5 +1,5 @@
 #if canImport(FoundationModels)
-import AgentAppCore
+import AgentAppKit
 import DurableCore
 import DurableFoundationModels
 import DurableStore

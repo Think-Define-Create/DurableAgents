@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import DurableFoundationModels
 import Foundation
 import ModelKit

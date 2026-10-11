@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA0000000000000000000030 /* AgentAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000020 /* AgentAppCore */; };
+		AA0000000000000000000030 /* AgentAppKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000020 /* AgentAppKit */; };
 		AA0000000000000000000031 /* DurableCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000021 /* DurableCore */; };
 		AA0000000000000000000032 /* DurableStore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000022 /* DurableStore */; };
 		AA0000000000000000000033 /* DurableSecurity in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000023 /* DurableSecurity */; };
@@ -47,7 +47,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA0000000000000000000030 /* AgentAppCore in Frameworks */,
+				AA0000000000000000000030 /* AgentAppKit in Frameworks */,
 				AA0000000000000000000031 /* DurableCore in Frameworks */,
 				AA0000000000000000000032 /* DurableStore in Frameworks */,
 				AA0000000000000000000033 /* DurableSecurity in Frameworks */,
@@ -111,7 +111,7 @@
 			);
 			name = AssistantApp;
 			packageProductDependencies = (
-				AA0000000000000000000020 /* AgentAppCore */,
+				AA0000000000000000000020 /* AgentAppKit */,
 				AA0000000000000000000021 /* DurableCore */,
 				AA0000000000000000000022 /* DurableStore */,
 				AA0000000000000000000023 /* DurableSecurity */,
@@ -430,10 +430,10 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		AA0000000000000000000020 /* AgentAppCore */ = {
+		AA0000000000000000000020 /* AgentAppKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA000000000000000000001A /* XCLocalSwiftPackageReference "../.." */;
-			productName = AgentAppCore;
+			productName = AgentAppKit;
 		};
 		AA0000000000000000000021 /* DurableCore */ = {
 			isa = XCSwiftPackageProductDependency;

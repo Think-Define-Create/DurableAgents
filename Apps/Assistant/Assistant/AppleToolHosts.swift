@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import Contacts
 import EventKit
 import Foundation

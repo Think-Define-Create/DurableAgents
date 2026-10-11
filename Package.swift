@@ -22,7 +22,7 @@ let package = Package(
         .library(name: "DurableSecurity", targets: ["DurableSecurity"]),
         .library(name: "DurableDelivery", targets: ["DurableDelivery"]),
         .library(name: "DurableMCP", targets: ["DurableMCP"]),
-        .library(name: "AgentAppCore", targets: ["AgentAppCore"]),
+        .library(name: "AgentAppKit", targets: ["AgentAppKit"]),
         .executable(name: "mcp-fixture", targets: ["MCPFixture"]),
         .library(name: "DurableObserve", targets: ["DurableObserve"]),
         .executable(name: "durable-audit", targets: ["DurableAudit"]),
@@ -250,7 +250,7 @@ let package = Package(
             ]
         ),
         .target(
-            name: "AgentAppCore",
+            name: "AgentAppKit",
             dependencies: [
                 "DurableCore",
                 "ModelKit",
@@ -264,9 +264,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "AgentAppCoreTests",
+            name: "AgentAppKitTests",
             dependencies: [
-                "AgentAppCore",
+                "AgentAppKit",
                 "DurableFoundationModels",
                 "DurableCore",
                 "DurableStore",

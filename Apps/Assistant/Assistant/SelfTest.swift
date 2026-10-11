@@ -1,5 +1,5 @@
 #if DEBUG
-import AgentAppCore
+import AgentAppKit
 import Contacts
 import DurableFoundationModels
 import DurableIdentity

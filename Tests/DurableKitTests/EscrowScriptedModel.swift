@@ -1,7 +1,7 @@
 import DurableCore
 import Foundation
 
-/// Deterministic escrow planner used when the on-device model is unavailable.
+/// Deterministic escrow planner for the DurableKit tests.
 ///
 /// The next step is a function of the latest user message, the tools already
 /// finished in this run, and the human approvals granted in this run.

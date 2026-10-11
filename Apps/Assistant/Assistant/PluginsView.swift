@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import DurableMCP
 import DurableSkills
 import SwiftUI

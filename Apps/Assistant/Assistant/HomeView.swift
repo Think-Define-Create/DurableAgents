@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import SwiftUI
 
 struct RootView: View {

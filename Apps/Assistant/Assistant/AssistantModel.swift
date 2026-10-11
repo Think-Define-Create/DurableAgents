@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import DurableCore
 import DurableFoundationModels
 import DurableIdentity

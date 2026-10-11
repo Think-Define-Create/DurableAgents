@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import DurableCore
 import PhotosUI
 import SwiftUI

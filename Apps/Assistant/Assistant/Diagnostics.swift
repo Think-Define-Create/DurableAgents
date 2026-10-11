@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import Contacts
 import DurableCore
 import DurableFoundationModels
@@ -91,9 +91,9 @@ final class Diagnostics {
         await check("DurableStore", "Every stored event in the app decrypts") { try await Checks.appStoreDecrypts(model.diagnosticsSupportURL) }
 
         // Bots.
-        await check("AgentAppCore", "Bot asks another bot") { try await Checks.botToBot(scratch) }
-        await check("AgentAppCore", "Reminder takes its time from the message") { try await Checks.reminderTime(scratch) }
-        await check("AgentAppCore", "Soul and memory reach each bot") { try await Checks.botContext(model) }
+        await check("AgentAppKit", "Bot asks another bot") { try await Checks.botToBot(scratch) }
+        await check("AgentAppKit", "Reminder takes its time from the message") { try await Checks.reminderTime(scratch) }
+        await check("AgentAppKit", "Soul and memory reach each bot") { try await Checks.botContext(model) }
         await check("DurableFoundationModels", "On-device model answers and remembers") { try await Checks.onDeviceRecall(scratch) }
         await check("DurableFoundationModels", "On-device model calls a tool") { try await Checks.onDeviceTool(scratch) }
         await check("DurableFoundationModels", "Private Cloud Compute reads past the on-device window") { try await Checks.privateCloudRecall(scratch) }

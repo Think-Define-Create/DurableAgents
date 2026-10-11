@@ -1,4 +1,4 @@
-import AgentAppCore
+import AgentAppKit
 import CoreSpotlight
 import Foundation
 import UniformTypeIdentifiers
