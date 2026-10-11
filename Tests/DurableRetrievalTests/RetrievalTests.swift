@@ -17,3 +17,9 @@ import Testing
     #expect(fused.map(\.id).sorted() == ["other", "tea"])
     #expect(fused[0].score == fused[1].score)
 }
+
+@Test func hashEmbeddersOfDifferentSizesHaveDifferentIDs() {
+    #expect(HashEmbedder().id == "hash-v1")
+    #expect(HashEmbedder(dimensions: 256).id == "hash-v1-256")
+    #expect(Embedders.fallback.id == "hash-v1-256")
+}

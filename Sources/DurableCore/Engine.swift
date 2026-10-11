@@ -2,6 +2,8 @@ import Foundation
 
 /// Single-owner run actor for every conversation in one store.
 ///
+/// Each conversation has its own lock, so one agent's model call or tool body does not hold up
+/// another agent. Recovery, timers and signals take every lock. Reads and plain appends take none.
 /// The store lease is the fence. A second process that opens the same store is
 /// rejected while the lease is live, and this actor's later commits fail if
 /// that lease is stolen. Recovery reads the event log and continues from the
@@ -20,14 +22,21 @@ public actor Engine {
     private let owner: UUID
     private var fence: FenceToken
     private let storeIdentifier: String
-    private var locked = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// Conversations a task is advancing right now.
+    private var heldKeys: Set<String> = []
+    /// A recovery, timer pump or signal holds every conversation.
+    private var globalHeld = false
+    private var waiters: [LockWaiter] = []
+    /// The locks the current task already holds, so nested calls do not wait on themselves.
+    @TaskLocal private static var scope = LockScope()
+    /// Not a conversation id. Serializes timer firing.
+    private static let timersKey = "\u{0}timers"
     private var poisoned = false
     private var closed = false
     /// Approval channels enqueue these while the lock is held. Flushed before the lock is released.
     private var pendingDeliveries: [JournaledDelivery] = []
     /// Set only while starting a delivery run, so deliveries use `RetryPolicy.standard`.
-    private var policyOverride: RetryPolicy?
+    @TaskLocal private static var policyOverride: RetryPolicy?
     private let leaseTTL: Duration
     private var keepAliveTask: Task<Void, Never>?
     /// Set when a renewal fails because the fence no longer matches. Later commits are rejected.
@@ -113,7 +122,7 @@ public actor Engine {
     /// Appends events on an arbitrary stream. Schedule and identity modules use this so they
     /// share the engine's fence instead of writing beside it.
     public func record(_ drafts: [EventDraft], stream: StreamID) async throws {
-        try await exclusively {
+        try await exclusively(.none) {
             try ensureWritable()
             _ = try await commit(stream, drafts)
         }
@@ -121,7 +130,7 @@ public actor Engine {
 
     /// Journals a timer request and notifies `TimerScheduling`. Does not suspend the run.
     public func requestTimer(name: String, fireAt: Date) async throws {
-        try await exclusively {
+        try await exclusively(.none) {
             try ensureWritable()
             _ = try await commit(StreamID("timers"), [
                 EventDraft(
@@ -139,7 +148,7 @@ public actor Engine {
 
     /// Fires journaled timers whose deadline has passed and continues runs that were waiting on them.
     public func pumpTimers() async throws -> [RecoveryAction] {
-        try await exclusively {
+        try await exclusively(.all) {
             try ensureWritable()
             try await fireDueTimers()
             await reschedulePendingTimers()
@@ -149,7 +158,7 @@ public actor Engine {
 
     /// Delivers a named signal. A run blocked on `waitSignal` resumes. A signal with no waiter stays queued.
     public func signal(_ name: String, payload: JSONValue = .null) async throws -> RecoveryAction? {
-        try await exclusively {
+        try await exclusively(.all) {
             try ensureWritable()
             if name.isEmpty {
                 throw DurableError.invariant("signal name is empty")
@@ -180,7 +189,7 @@ public actor Engine {
     }
 
     public func submit(_ submission: Submission, to existing: ConversationID? = nil) async throws -> SubmitResult {
-        try await exclusively {
+        try await exclusively(existing.map { .conversation($0.raw) } ?? .none) {
             try await accept(
                 text: submission.text,
                 requestID: submission.requestID,
@@ -201,7 +210,7 @@ public actor Engine {
         to existing: ConversationID? = nil,
         budget: RunBudget? = nil
     ) async throws -> SubmitResult {
-        try await exclusively {
+        try await exclusively(existing.map { .conversation($0.raw) } ?? .none) {
             try await accept(
                 text: text,
                 requestID: requestID,
@@ -215,7 +224,7 @@ public actor Engine {
     }
 
     public func listConversations() async throws -> [ConversationID] {
-        try await exclusively {
+        try await exclusively(.none) {
             let projection = try await load()
             return projection.conversationOrder.compactMap { raw in
                 projection.conversations[raw] == nil ? nil : ConversationID(raw: raw)
@@ -228,7 +237,7 @@ public actor Engine {
         decision: ApprovalDecision,
         approver: Approver = Approver(id: "local", authLevel: .session)
     ) async throws -> ResumeResult {
-        try await exclusively {
+        try await exclusively(.conversation(token.conversationID.raw)) {
             try ensureWritable()
             let projection = try await load()
             guard let conversation = projection.conversations[token.conversationID.raw],
@@ -270,7 +279,7 @@ public actor Engine {
 
     /// Continues runs that were `running` when the process died, and reports runs that are still suspended.
     public func recover() async throws -> [RecoveryAction] {
-        try await exclusively {
+        try await exclusively(.all) {
             try ensureWritable()
             try await fireDueTimers()
             await reschedulePendingTimers()
@@ -281,7 +290,7 @@ public actor Engine {
     }
 
     public func snapshot(_ id: ConversationID) async throws -> ConversationSnapshot {
-        try await exclusively {
+        try await exclusively(.none) {
             let projection = try await load()
             guard let conversation = projection.conversations[id.raw] else {
                 throw DurableError.invariant("no conversation \(id.raw)")
@@ -292,7 +301,7 @@ public actor Engine {
 
     /// Copies the transcript into a new conversation. Event ids are new. The source log is unchanged.
     public func fork(_ source: ConversationID) async throws -> ConversationID {
-        try await exclusively {
+        try await exclusively(.conversation(source.raw)) {
             try ensureWritable()
             let projection = try await load()
             guard let conversation = projection.conversations[source.raw] else {
@@ -322,20 +331,20 @@ public actor Engine {
     }
 
     public func transcript(_ id: ConversationID) async throws -> [TranscriptMessage] {
-        try await exclusively {
+        try await exclusively(.none) {
             let envelopes = try await store.read(stream: .conversation(id))
             return try envelopes.compactMap { try EventCodec.transcriptMessage($0) }
         }
     }
 
     public func events(for id: ConversationID) async throws -> [EventEnvelope] {
-        try await exclusively {
+        try await exclusively(.none) {
             try await store.read(stream: .conversation(id))
         }
     }
 
     public func storedValue(namespace: String, key: String) async throws -> JSONValue? {
-        try await exclusively {
+        try await exclusively(.none) {
             let projection = try await load()
             return projection.values[Projection.valueKey(namespace: namespace, key: key)]
         }
@@ -348,7 +357,7 @@ public actor Engine {
         closed = true
         keepAliveTask?.cancel()
         keepAliveTask = nil
-        await lock()
+        let granted = await acquire(.all)
         if !already {
             do {
                 try await store.releaseLease(fence: fence)
@@ -356,7 +365,7 @@ public actor Engine {
                 // The lease was already stolen or released.
             }
         }
-        unlock()
+        release(granted)
     }
 
     private func continueRunning() async throws -> [RecoveryAction] {
@@ -367,6 +376,9 @@ public actor Engine {
         }.sorted()
         var actions: [RecoveryAction] = []
         for key in ids {
+            // Another task is advancing this one. It settles there, not here.
+            guard let granted = tryAcquire(key) else { continue }
+            defer { release(granted) }
             let projection = try await load()
             guard let conversation = projection.conversations[key] else { continue }
             guard let run = conversation.activeRun else {
@@ -397,7 +409,9 @@ public actor Engine {
             "conversation": .string(id.raw),
         ])
         do {
-            let view = try await advanceLoop(id)
+            let view = try await Self.$scope.withValue(Self.scope.adding(id.raw)) {
+                try await advanceLoop(id)
+            }
             var ended: [String: SpanAttribute] = [:]
             if let status = view.runStatus {
                 ended["status"] = .string(status.rawValue)
@@ -521,7 +535,7 @@ public actor Engine {
             "runID": .string(runID.raw),
             "requestID": .string(submission.requestID),
             "script": submission.script.json(),
-            "retry": (policyOverride ?? retryPolicy).json(),
+            "retry": (Self.policyOverride ?? retryPolicy).json(),
         ]
         if submission.driver == .model {
             payload["driver"] = .string(RunDriver.model.rawValue)
@@ -552,6 +566,9 @@ public actor Engine {
             _ = try await continueRunning()
         }
         let conversationID = existing ?? ConversationID.generate()
+        // A new conversation is free, so this never waits. It keeps a concurrent recovery off it.
+        let granted = tryAcquire(conversationID.raw)
+        defer { if let granted { release(granted) } }
         let before = try await load()
         if let conversation = before.conversations[conversationID.raw],
            let prior = conversation.submissions.first(where: { $0.requestID == requestID })
@@ -1496,11 +1513,14 @@ public actor Engine {
         } else {
             goal = Self.display(call.arguments)
         }
+        // A call may name an existing conversation, such as another agent's own chat. The turn then
+        // runs there and stays in that conversation's history. Otherwise a private child is made.
+        let target = call.arguments.objectValue?["conversation"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
         let childID: ConversationID
         if let existing = run.subagents[call.callID] {
             childID = ConversationID(raw: existing.conversationID)
         } else {
-            childID = ConversationID(raw: "child:\(conversation.id.raw):\(run.id.raw):\(index):\(call.callID)")
+            childID = ConversationID(raw: target ?? "child:\(conversation.id.raw):\(run.id.raw):\(index):\(call.callID)")
             _ = try await commit(.conversation(conversation.id), [
                 EventDraft(
                     type: EventType.subagentStarted,
@@ -1510,19 +1530,43 @@ public actor Engine {
                         "callID": .string(call.callID),
                         "name": .string(call.name),
                         "goal": .string(goal),
+                        "arguments": call.arguments,
                         "childConversationID": .string(childID.raw),
                     ])
                 ),
             ])
         }
+        let shared = !childID.raw.hasPrefix("child:")
         let requestID = "childreq:\(run.id.raw):\(index):\(call.callID)"
         let projection = try await load()
         let child = projection.conversations[childID.raw]
-        let settled: StatusView
-        if let child, child.latestRun?.status == .completed || child.latestRun?.status == .failed {
-            settled = Self.view(of: child)
-        } else if child?.activeRun != nil {
+        let ours = child?.runs.values.first { $0.requestID == requestID }
+        var settled: StatusView
+        // Waiting for another conversation's lock could deadlock (two agents asking each other).
+        let granted = tryAcquire(childID.raw)
+        defer { if let granted { release(granted) } }
+        if let ours, ours.status == .completed || ours.status == .failed {
+            settled = Self.view(of: ours)
+        } else if granted == nil {
+            settled = StatusView(
+                queued: false,
+                runStatus: .completed,
+                resumeToken: nil,
+                finalText: "That conversation is busy with another request right now. Try again in a moment.",
+                failure: nil
+            )
+        } else if ours != nil {
             settled = try await advance(childID)
+        } else if shared, child?.activeRun != nil || child?.submissions.contains(where: { $0.runID == nil }) == true {
+            // The other conversation is in the middle of its own turn. Waiting here could deadlock
+            // (two agents asking each other), so the caller hears it is busy and can try again.
+            settled = StatusView(
+                queued: false,
+                runStatus: .completed,
+                resumeToken: nil,
+                finalText: "That conversation is busy with another request right now. Try again in a moment.",
+                failure: nil
+            )
         } else {
             let submitted = try await accept(
                 text: goal,
@@ -1539,6 +1583,16 @@ public actor Engine {
                 resumeToken: submitted.resumeToken,
                 finalText: submitted.finalText,
                 failure: submitted.failure
+            )
+        }
+        if shared, settled.runStatus == .suspended {
+            // The person approves in that conversation. The caller should not wait for it.
+            settled = StatusView(
+                queued: false,
+                runStatus: .completed,
+                resumeToken: nil,
+                finalText: "That request is waiting for the person's approval in its own chat.",
+                failure: nil
             )
         }
         guard settled.runStatus == .completed else {
@@ -1781,23 +1835,23 @@ public actor Engine {
             ])
             let text = "delivery \(job.id)"
             let requestID = "delivery:\(job.id)"
-            policyOverride = RetryPolicy.standard
             do {
-                _ = try await accept(
-                    text: text,
-                    requestID: requestID,
-                    hash: Submission(requestID: requestID, text: text, script: script).payloadHash(),
-                    script: script,
-                    driver: .script,
-                    existing: nil,
-                    continueFirst: false
-                )
+                // Task-local, so a run in another conversation keeps its own policy meanwhile.
+                _ = try await Self.$policyOverride.withValue(RetryPolicy.standard) {
+                    try await accept(
+                        text: text,
+                        requestID: requestID,
+                        hash: Submission(requestID: requestID, text: text, script: script).payloadHash(),
+                        script: script,
+                        driver: .script,
+                        existing: nil,
+                        continueFirst: false
+                    )
+                }
             } catch {
-                policyOverride = nil
                 pendingDeliveries.insert(job, at: 0)
                 throw error
             }
-            policyOverride = nil
         }
     }
 
@@ -1816,6 +1870,9 @@ public actor Engine {
     }
 
     private func fireDueTimers() async throws {
+        // One task fires timers at a time, so a timer is never fired twice.
+        let timersLock = await acquire(.conversation(Self.timersKey))
+        defer { release(timersLock) }
         let now = clock.now()
         var guardCount = 0
         while guardCount < 1_000 {
@@ -1833,7 +1890,11 @@ public actor Engine {
                 ),
             ])
             let again = try await load()
-            if let match = Self.waitingRun(in: again, kind: "timer", name: name) {
+            // A conversation another task is advancing picks the fired timer up on its next pass.
+            if let match = Self.waitingRun(in: again, kind: "timer", name: name),
+               let granted = tryAcquire(match.conversation.id.raw)
+            {
+                defer { release(granted) }
                 try await resolveWait(match.conversation, run: match.run, payload: .null)
             }
         }
@@ -1936,36 +1997,114 @@ public actor Engine {
         if closed { throw DurableError.closed }
     }
 
-    private func exclusively<T: Sendable>(_ body: () async throws -> T) async throws -> T {
-        await lock()
+    private func exclusively<T: Sendable>(_ mode: LockMode, _ body: () async throws -> T) async throws -> T {
+        let granted = await acquire(mode)
         do {
-            let value = try await body()
-            if !poisoned && !closed {
-                try await flushDeliveries()
+            let value = try await Self.$scope.withValue(granted.scope) {
+                let value = try await body()
+                if !poisoned && !closed {
+                    try await flushDeliveries()
+                }
+                return value
             }
-            unlock()
+            release(granted)
             return value
         } catch {
-            unlock()
+            release(granted)
             throw error
         }
     }
 
-    private func lock() async {
-        if !locked {
-            locked = true
-            return
+    /// Waits for `mode`. Locks the current task already holds are granted at once and not released twice.
+    private func acquire(_ mode: LockMode) async -> LockGrant {
+        let current = Self.scope
+        if let grant = immediateGrant(mode, current: current) {
+            return grant
         }
         await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+            waiters.append(LockWaiter(mode: mode, nested: current.all || !current.keys.isEmpty, continuation: continuation))
+        }
+        // `pump` took the lock for this waiter before resuming it.
+        return LockGrant(mode: mode, owned: true, scope: current.with(mode))
+    }
+
+    /// Takes one conversation without waiting, or nil when another task holds it.
+    private func tryAcquire(_ key: String) -> LockGrant? {
+        let current = Self.scope
+        if current.all || current.keys.contains(key) {
+            return LockGrant(mode: .conversation(key), owned: false, scope: current)
+        }
+        guard !globalHeld, !heldKeys.contains(key) else { return nil }
+        heldKeys.insert(key)
+        return LockGrant(mode: .conversation(key), owned: true, scope: current.adding(key))
+    }
+
+    private func immediateGrant(_ mode: LockMode, current: LockScope) -> LockGrant? {
+        switch mode {
+        case .none:
+            return LockGrant(mode: mode, owned: false, scope: current)
+        case .conversation(let key):
+            if current.all || current.keys.contains(key) {
+                return LockGrant(mode: mode, owned: false, scope: current)
+            }
+            // A queued recovery goes first, so it is not starved by new turns. A task that already
+            // holds a lock skips that rule, or the recovery and this task would wait on each other.
+            let recoveryWaiting = current.keys.isEmpty && waiters.contains { $0.mode == .all }
+            guard !recoveryWaiting, !globalHeld, !heldKeys.contains(key) else { return nil }
+            heldKeys.insert(key)
+            return LockGrant(mode: mode, owned: true, scope: current.adding(key))
+        case .all:
+            if current.all {
+                return LockGrant(mode: mode, owned: false, scope: current)
+            }
+            guard waiters.isEmpty, !globalHeld, heldKeys.isEmpty else { return nil }
+            globalHeld = true
+            return LockGrant(mode: mode, owned: true, scope: current.with(mode))
         }
     }
 
-    private func unlock() {
-        if waiters.isEmpty {
-            locked = false
-        } else {
-            waiters.removeFirst().resume()
+    private func release(_ grant: LockGrant) {
+        guard grant.owned else { return }
+        switch grant.mode {
+        case .none:
+            return
+        case .conversation(let key):
+            heldKeys.remove(key)
+        case .all:
+            globalHeld = false
+        }
+        pump()
+    }
+
+    /// Wakes waiters in order. A waiter for everything holds back the new turns behind it until it
+    /// has run. Waiters that already hold a lock still go, since the recovery is waiting on them.
+    private func pump() {
+        var barrier = false
+        var index = 0
+        while index < waiters.count {
+            let waiter = waiters[index]
+            switch waiter.mode {
+            case .none:
+                waiters.remove(at: index)
+                waiter.continuation.resume()
+            case .conversation(let key):
+                if (!barrier || waiter.nested), !globalHeld, !heldKeys.contains(key) {
+                    heldKeys.insert(key)
+                    waiters.remove(at: index)
+                    waiter.continuation.resume()
+                } else {
+                    index += 1
+                }
+            case .all:
+                if !barrier, !globalHeld, heldKeys.isEmpty {
+                    globalHeld = true
+                    waiters.remove(at: index)
+                    waiter.continuation.resume()
+                } else {
+                    barrier = true
+                    index += 1
+                }
+            }
         }
     }
 
@@ -1981,6 +2120,16 @@ public actor Engine {
             resumeToken: view.resumeToken,
             finalText: view.finalText,
             failure: view.failure
+        )
+    }
+
+    private static func view(of run: FoldedRun) -> StatusView {
+        StatusView(
+            queued: false,
+            runStatus: run.status,
+            resumeToken: run.pending?.token,
+            finalText: run.finalText,
+            failure: run.failure
         )
     }
 
@@ -2295,4 +2444,48 @@ private struct StatusView: Sendable, Equatable {
     var resumeToken: ResumeToken?
     var finalText: String?
     var failure: String?
+}
+
+enum LockMode: Sendable, Equatable {
+    /// No lock. Reads, and appends that are one atomic commit.
+    case none
+    case conversation(String)
+    /// Every conversation: recovery, timer pumps, signals, close.
+    case all
+}
+
+struct LockScope: Sendable {
+    var all = false
+    var keys: Set<String> = []
+
+    func adding(_ key: String) -> LockScope {
+        var next = self
+        next.keys.insert(key)
+        return next
+    }
+
+    func with(_ mode: LockMode) -> LockScope {
+        switch mode {
+        case .none: return self
+        case .conversation(let key): return adding(key)
+        case .all:
+            var next = self
+            next.all = true
+            return next
+        }
+    }
+}
+
+struct LockGrant: Sendable {
+    var mode: LockMode
+    /// False when the task already held it, so releasing does nothing.
+    var owned: Bool
+    var scope: LockScope
+}
+
+struct LockWaiter {
+    var mode: LockMode
+    /// The waiting task already holds a lock.
+    var nested: Bool
+    var continuation: CheckedContinuation<Void, Never>
 }

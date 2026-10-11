@@ -174,22 +174,29 @@ public actor SkillLibrary {
     public func importDirectory(_ url: URL, editor: String) async throws -> SkillManifest {
         let markdownURL = url.appendingPathComponent("SKILL.md")
         let markdown = try String(contentsOf: markdownURL, encoding: .utf8)
+        let files = Self.supportingFiles(in: url)
+        return try await install(directoryName: url.lastPathComponent, markdown: markdown, files: files, editor: editor)
+    }
+
+    /// Synchronous because Darwin's directory enumerator cannot be iterated in an async context.
+    private static func supportingFiles(in url: URL) -> [String: String] {
         var files: [String: String] = [:]
         let root = url.standardizedFileURL.path
-        if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) {
-            for case let file as URL in enumerator {
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
-                    continue
-                }
-                let relative = String(file.standardizedFileURL.path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                if relative == "SKILL.md" { continue }
-                if let text = try? String(contentsOf: file, encoding: .utf8) {
-                    files[relative] = text
-                }
+        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) else {
+            return files
+        }
+        for case let file as URL in enumerator {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+                continue
+            }
+            let relative = String(file.standardizedFileURL.path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if relative == "SKILL.md" { continue }
+            if let text = try? String(contentsOf: file, encoding: .utf8) {
+                files[relative] = text
             }
         }
-        return try await install(directoryName: url.lastPathComponent, markdown: markdown, files: files, editor: editor)
+        return files
     }
 
     public func propose(directoryName: String, markdown: String, files: [String: String] = [:], author: String) async throws -> SkillProposal {

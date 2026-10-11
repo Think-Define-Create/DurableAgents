@@ -297,6 +297,8 @@ import Darwin
         timeoutSeconds: 5
     )
     let session = try await MCPClientSession.connect(config, secrets: DictionarySecrets(["fixture-token": secret]))
+    // The fixture is an SDK server, so the discover probe falls back to the legacy handshake.
+    #expect(await session.protocolVersion == MCPProtocol.legacy)
     let listed = try await session.listTools()
     #expect(listed.contains { $0.name == "echo" && $0.hints.readOnlyHint == true })
     let tools = try MCPToolBridge.makeTools(config: config, listed: listed, caller: session)
@@ -345,14 +347,53 @@ import Darwin
     )
     #expect(started.isError == false)
     #expect(started.texts.joined().contains("completed"))
+    #expect(await session.protocolVersion == MCPProtocol.modern)
     let raw = loop.recorded().joined()
     #expect(raw.lowercased().contains("x-mcp-auth: \(secret)"))
+    #expect(raw.lowercased().contains("mcp-method: tools/call"))
+    #expect(raw.lowercased().contains("mcp-name: start_run"))
     let blob = try await store.readAll().map { $0.payload.canonicalJSON() }.joined(separator: "\n")
     #expect(blob.contains("status please"))
     #expect(!blob.contains(secret))
     await session.close()
     await host.stop()
     loop.stop()
+}
+
+@Test func stdioSpeaksTheModernProtocolToAModernServer() async throws {
+    let binary = try fixtureBinary()
+    let config = MCPServerConfig(
+        name: "modern",
+        transport: "stdio",
+        command: binary,
+        args: ["--modern"],
+        allow: ["echo"],
+        timeoutSeconds: 5
+    )
+    let session = try await MCPClientSession.connect(config, secrets: DictionarySecrets([:]))
+    #expect(await session.protocolVersion == MCPProtocol.modern)
+    #expect(try await session.describe().serverName == "mcp-fixture-modern")
+    let listed = try await session.listTools()
+    let tools = try MCPToolBridge.makeTools(config: config, listed: listed, caller: session)
+    let store = InMemoryEventStore()
+    let engine = try await Engine(store: store, tools: tools, leaseTTL: .seconds(3600))
+    let result = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "echo",
+        script: Script(steps: [
+            .tool(name: "mcp.modern.echo", callID: "c1", arguments: .object(["text": .string("hi")])),
+            .finish("done"),
+        ])
+    ))
+    #expect(result.runStatus == .completed)
+    let blob = try await store.readAll().map { $0.payload.canonicalJSON() }.joined(separator: "\n")
+    #expect(blob.contains("hi modern key=dak-"))
+    await session.close()
+
+    let legacyOnly = MCPServerConfig(name: "modern", transport: "stdio", command: binary, args: ["--modern"], allow: ["echo"], timeoutSeconds: 5, protocolVersion: .modern)
+    let pinned = try await MCPClientSession.connect(legacyOnly, secrets: DictionarySecrets([:]))
+    #expect(await pinned.protocolVersion == MCPProtocol.modern)
+    await pinned.close()
 }
 
 private struct DictionarySecrets: MCPSecretStore {
@@ -473,16 +514,30 @@ private func fixtureBinary() throws -> String {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
-    let build = root.appendingPathComponent(".build")
-    guard let enumerator = FileManager.default.enumerator(at: build, includingPropertiesForKeys: nil) else {
-        throw MCPCallError("missing .build")
-    }
-    for case let url as URL in enumerator {
-        if url.lastPathComponent == "mcp-fixture", !url.hasDirectoryPath, !url.path.contains(".dSYM") {
-            return url.path
+    // Search every build directory (`.build`, or a `--build-path` like `.build-x`) and take the newest
+    // fixture, so a test run does not pick up a stale binary from another build path.
+    let builds = ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+        .filter { $0.lastPathComponent.hasPrefix(".build") }
+    var candidates: [URL] = []
+    for build in builds {
+        // `debug` (and `<triple>/debug` on Linux), or `out/Products/Debug` with the Xcode build system.
+        candidates.append(build.appendingPathComponent("debug/mcp-fixture"))
+        candidates.append(build.appendingPathComponent("out/Products/Debug/mcp-fixture"))
+        for child in (try? FileManager.default.contentsOfDirectory(at: build, includingPropertiesForKeys: nil)) ?? [] {
+            candidates.append(child.appendingPathComponent("debug/mcp-fixture"))
         }
     }
-    throw MCPCallError("mcp-fixture binary was not built")
+    var newest: (URL, Date)?
+    for url in candidates where FileManager.default.isExecutableFile(atPath: url.path) {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path)[.modificationDate] as? Date) ?? .distantPast
+        if newest == nil || modified > newest!.1 {
+            newest = (url, modified)
+        }
+    }
+    guard let newest else {
+        throw MCPCallError("mcp-fixture binary was not built")
+    }
+    return newest.0.path
 }
 
 private final class MCPLoopback: @unchecked Sendable {

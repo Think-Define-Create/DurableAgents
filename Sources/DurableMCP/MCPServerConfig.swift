@@ -17,6 +17,10 @@ public struct MCPServerConfig: Codable, Sendable, Equatable {
     public var allow: [String]
     public var timeoutSeconds: Double
     public var tools: [String: MCPToolOverride]
+    /// `automatic` (default) tries 2026-07-28 and falls back to the SDK's 2025-11-25 handshake.
+    public var protocolVersion: MCPProtocolChoice
+    /// How long a task-backed call may poll before it fails. Each request still uses `timeoutSeconds`.
+    public var taskTimeoutSeconds: Double
 
     public init(
         name: String,
@@ -28,7 +32,9 @@ public struct MCPServerConfig: Codable, Sendable, Equatable {
         headerSecrets: [String: String] = [:],
         allow: [String] = [],
         timeoutSeconds: Double = 30,
-        tools: [String: MCPToolOverride] = [:]
+        tools: [String: MCPToolOverride] = [:],
+        protocolVersion: MCPProtocolChoice = .automatic,
+        taskTimeoutSeconds: Double = 3600
     ) {
         self.name = name
         self.transport = transport
@@ -40,6 +46,8 @@ public struct MCPServerConfig: Codable, Sendable, Equatable {
         self.allow = allow
         self.timeoutSeconds = timeoutSeconds
         self.tools = tools
+        self.protocolVersion = protocolVersion
+        self.taskTimeoutSeconds = taskTimeoutSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,6 +62,8 @@ public struct MCPServerConfig: Codable, Sendable, Equatable {
         allow = try container.decodeIfPresent([String].self, forKey: .allow) ?? []
         timeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .timeoutSeconds) ?? 30
         tools = try container.decodeIfPresent([String: MCPToolOverride].self, forKey: .tools) ?? [:]
+        protocolVersion = try container.decodeIfPresent(MCPProtocolChoice.self, forKey: .protocolVersion) ?? .automatic
+        taskTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .taskTimeoutSeconds) ?? 3600
     }
 
     public static func parse(_ json: String) throws -> MCPServerConfig {

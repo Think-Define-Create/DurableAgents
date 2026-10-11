@@ -131,6 +131,14 @@ public struct RoutingModelStep: ModelStep {
     public var foundationModelsLinked: Bool
     public var apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)?
     public var builds: ProviderBuildCounter
+    public var instructions: String
+    public var roster: AgentRoster
+    public var context: ContextBuilder?
+
+    public static let defaultInstructions = "You are a personal agent. Use tools when they help. Do not invent tool results."
+
+    /// Cloud models think before they answer, and thinking shares this budget with the reply.
+    public static let cloudMaxOutputTokens = 16_000
 
     public init(
         table: ProviderTable,
@@ -139,7 +147,10 @@ public struct RoutingModelStep: ModelStep {
         transcript: LiveTranscript,
         foundationModelsLinked: Bool = false,
         apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)? = nil,
-        builds: ProviderBuildCounter = ProviderBuildCounter()
+        builds: ProviderBuildCounter = ProviderBuildCounter(),
+        instructions: String = RoutingModelStep.defaultInstructions,
+        roster: AgentRoster = AgentRoster(),
+        context: ContextBuilder? = nil
     ) {
         self.table = table
         self.policy = policy
@@ -148,7 +159,15 @@ public struct RoutingModelStep: ModelStep {
         self.foundationModelsLinked = foundationModelsLinked
         self.apple = apple
         self.builds = builds
+        self.instructions = instructions
+        self.roster = roster
+        self.context = context
     }
+
+    /// Tools no model is offered. Document text needs the file's bytes, which the composer reads instead.
+    public static let hiddenTools: Set<String> = [BuiltinToolID.documentOCR]
+    /// Offered only to scheduled routines.
+    public static let routineOnlyTools: Set<String> = ["heartbeat.respond"]
 
     /// The session passes this to the engine as `RunBudget.maxSteps`. The engine stops the run
     /// before the next plan, so a model that keeps asking for tools cannot run forever.
@@ -159,19 +178,277 @@ public struct RoutingModelStep: ModelStep {
     }
 
     public func plan(context: ModelContext) async throws -> ScriptedStep {
-        let choice = await table.choice(for: context.conversationID.raw)
-        if await policy.onDeviceOnly, OnDevicePolicy.blocksCloud(choice) {
-            return .finish("On-device only is on. Switch this agent to Apple or the offline demo before using a cloud model.")
+        let raw = context.conversationID.raw
+        var working = context
+        var kind = TurnKind.chat
+        var agent: AgentProfile?
+        let firstUser = context.messages.first { $0.role == "user" }?.text ?? ""
+        let latestIndex = context.messages.lastIndex { $0.role == "user" }
+        // Messages from other bots carry a routing header. The newest one decides whether this
+        // turn answers a bot; older ones are shown to the model as plain lines from that bot.
+        for index in working.messages.indices where working.messages[index].role == "user" && index != latestIndex {
+            if let message = BotMessage.decode(working.messages[index].text) {
+                let sender = await roster.agent(id: message.from)?.title ?? "Another bot"
+                // "Assistant" is also a role label in the on-device prompt, so the sender is named in full.
+                working.messages[index].text = "Message from the bot named \(sender): \(message.text)"
+            }
         }
+        if let latestIndex, let message = BotMessage.decode(context.messages[latestIndex].text) {
+            guard let receiver = await roster.agent(id: message.to), !receiver.archived else {
+                let names = await roster.active().map(\.title).joined(separator: ", ")
+                return .finish("There is no bot named \(message.to). The bots are: \(names).")
+            }
+            agent = receiver
+            let sender = await roster.agent(id: message.from)?.title ?? "Another bot"
+            kind = .botMessage(from: sender)
+            // Said as "user:" the question reads as the person's own words, and a small model then
+            // copies its last reply to the person. Naming the sender keeps the two apart.
+            working.messages[latestIndex].text = "\(sender) (another bot) asks: \(message.text)"
+        } else if let id = RoutinePrompt.agentID(in: firstUser), let owner = await roster.agent(id: id) {
+            agent = owner
+            kind = .routine
+            if let index = working.messages.firstIndex(where: { $0.role == "user" }) {
+                working.messages[index].text = "Scheduled routine. Checklist:\n" + RoutinePrompt.checklist(in: firstUser)
+            }
+        } else {
+            agent = await roster.owner(of: raw)
+        }
+        // The routing header added to a bot message is not shown back to the asking model.
+        for index in working.completedTools.indices where working.completedTools[index].name == BotMessage.toolName {
+            if var arguments = working.completedTools[index].arguments.objectValue {
+                arguments["goal"] = nil
+                arguments["conversation"] = nil
+                working.completedTools[index].arguments = .object(arguments)
+            }
+        }
+        let choice: ProviderChoice
+        if kind != .chat, let agent {
+            choice = agent.provider
+        } else {
+            choice = await table.choice(for: raw)
+        }
+        if await policy.onDeviceOnly, OnDevicePolicy.blocksCloud(choice) {
+            return .finish("On-device only is on. Switch this agent to Apple on-device or the offline demo before using a cloud model.")
+        }
+        let onDevice = OnDevicePolicy.isSmallModel(choice)
+        let offline = await policy.onDeviceOnly
+        working.tools = context.tools.filter { spec in
+            if Self.hiddenTools.contains(spec.name) { return false }
+            if Self.routineOnlyTools.contains(spec.name) { return kind == .routine }
+            if spec.name == BuiltinToolID.webFetch, offline { return false }
+            return true
+        }
+        var extra: [ModelToolDefinition] = []
+        var others: [AgentProfile] = []
+        if case .botMessage = kind {
+            // A bot answering another bot does not start a third conversation.
+        } else if let agent {
+            others = await roster.active().filter { $0.id != agent.id }
+        }
+        let latest = working.messages.last { $0.role == "user" }?.text ?? ""
+        if onDevice {
+            if !working.completedTools.isEmpty {
+                // The small model tends to call the same tool again. Once a result is in, it answers.
+                working.tools = []
+                others = []
+            } else if kind == .routine {
+                // The reply text becomes the notification, so the small model skips heartbeat.respond.
+                working.tools = ToolRelevance.filter(working.tools, message: RoutinePrompt.checklist(in: firstUser), botNames: [])
+                    .filter { ToolRelevance.keywords[$0.name] != nil && $0.name != "memory.remember" }
+                others = []
+            } else {
+                working.tools = ToolRelevance.filter(working.tools, message: latest, botNames: others.map(\.title))
+                if !ToolRelevance.mentionsBot(latest, botNames: others.map(\.title)) {
+                    others = []
+                }
+            }
+        }
+        if !others.isEmpty {
+            extra.append(BotMessage.definition(for: others))
+        }
+        let text = await instructions(for: agent, kind: kind, context: working, compact: onDevice)
         let provider = makeProvider(choice)
         builds.count += 1
-        let publishing = PublishingProvider(inner: provider, transcript: transcript, conversationID: context.conversationID.raw)
+        let publishing = PublishingProvider(
+            inner: WireToolNames(inner: provider),
+            transcript: transcript,
+            conversationID: raw
+        )
         let step = AgentLoopStep(
             provider: publishing,
             modelName: choice.model,
-            instructions: "You are Lumen, a personal agent. Use tools when they help. Do not invent tool results."
+            instructions: text,
+            maxOutputTokens: OnDevicePolicy.blocksCloud(choice) ? Self.cloudMaxOutputTokens : 1024,
+            subagentTools: extra.isEmpty ? [] : [BotMessage.toolName],
+            extraTools: extra
         )
-        return try await step.plan(context: context)
+        var planned = try await step.plan(context: working)
+        if case .finish(let text) = planned {
+            let offered = working.tools.map(\.name) + extra.map(\.name)
+            if let call = Self.toolCallWrittenAsText(text, offered: offered) {
+                planned = .providerTurn(ProviderTurnStep(text: "", calls: [
+                    PlannedCall(name: call.name, callID: "text-" + UUID().uuidString.lowercased(), arguments: call.arguments, subagent: call.name == BotMessage.toolName),
+                ]))
+            }
+        }
+        // "Ask Cal …" is an instruction to message Cal. The small model sometimes answers from
+        // shared memory instead, so a direct request to a named bot is sent even then.
+        if case .finish = planned, working.completedTools.isEmpty, extra.contains(where: { $0.name == BotMessage.toolName }),
+           let direct = Self.directBotRequest(latest, botNames: others.map(\.title)) {
+            planned = .providerTurn(ProviderTurnStep(text: "", calls: [
+                PlannedCall(
+                    name: BotMessage.toolName,
+                    callID: "direct-" + UUID().uuidString.lowercased(),
+                    arguments: .object(["bot": .string(direct.bot), "message": .string(direct.message)]),
+                    subagent: true
+                ),
+            ]))
+        }
+        if case .finish(let text) = planned {
+            planned = .finish(Self.withoutSpeakerLabel(text, names: ["assistant", agent?.title ?? ""]))
+        }
+        guard case .providerTurn(var turn) = planned, let sender = agent else { return planned }
+        // The small model sometimes repeats its previous call's bot or question. When the person
+        // wrote "ask <bot> …", that bot is used, and a question that shares no word with the request
+        // is replaced by the person's own words.
+        if working.completedTools.isEmpty, let direct = Self.directBotRequest(latest, botNames: others.map(\.title)) {
+            for index in turn.calls.indices where turn.calls[index].name == BotMessage.toolName {
+                var arguments = turn.calls[index].arguments.objectValue ?? [:]
+                arguments["bot"] = .string(direct.bot)
+                let asked = arguments["message"]?.stringValue ?? ""
+                if !Self.sharesContentWord(asked, latest) {
+                    arguments["message"] = .string(direct.message)
+                }
+                turn.calls[index].arguments = .object(arguments)
+            }
+        }
+        for index in turn.calls.indices where turn.calls[index].name == BotMessage.toolName {
+            let arguments = turn.calls[index].arguments.objectValue ?? [:]
+            let name = arguments["bot"]?.stringValue ?? ""
+            let message = arguments["message"]?.stringValue ?? ""
+            let found = await roster.named(name)
+            let receiver = found?.id ?? name
+            var rewritten = arguments
+            rewritten["goal"] = .string(BotMessage.encode(to: receiver, from: sender.id, text: message))
+            // The message goes into the other bot's own chat, so the person sees it there.
+            if let conversationID = found?.conversationID, found?.id != sender.id {
+                rewritten["conversation"] = .string(conversationID)
+            }
+            turn.calls[index].arguments = .object(rewritten)
+        }
+        // Small models often drop the time from "remind me tomorrow at 9am". Without it a reminder
+        // never alerts and an event lands at the wrong time, so take it from the person's own words.
+        let timed = [BuiltinToolID.reminder: "due", BuiltinToolID.calendarWrite: "start"]
+        let said = working.messages.last { $0.role == "user" }?.text ?? ""
+        for index in turn.calls.indices {
+            guard let key = timed[turn.calls[index].name] else { continue }
+            var arguments = turn.calls[index].arguments.objectValue ?? [:]
+            let given = arguments[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard given.isEmpty, let date = ToolDates.natural(said) else { continue }
+            arguments[key] = .string(ToolDates.local(date))
+            turn.calls[index].arguments = .object(arguments)
+        }
+        return .providerTurn(turn)
+    }
+
+    private static let commonWords: Set<String> = [
+        "what", "when", "where", "which", "while", "with", "that", "this", "these", "those", "your", "yours",
+        "have", "does", "know", "about", "tell", "from", "there", "their", "they", "them", "will", "would",
+        "could", "should", "please", "person", "wants", "just", "like", "some",
+    ]
+
+    /// True when both texts share a word of four or more letters that is not a common question word.
+    static func sharesContentWord(_ left: String, _ right: String) -> Bool {
+        func words(_ text: String) -> Set<String> {
+            Set(text.lowercased().split { !$0.isLetter }.map(String.init).filter { $0.count >= 4 && !commonWords.contains($0) })
+        }
+        return !words(left).isDisjoint(with: words(right))
+    }
+
+    /// "Ask Cal what my dog's name is" gives ("Cal", "The person wants to know what my dog's name is.").
+    /// Only a message that starts with ask, tell or message and a bot's exact name counts.
+    public static func directBotRequest(_ text: String, botNames: [String]) -> (bot: String, message: String)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for verb in ["ask", "tell", "message"] {
+            for name in botNames.sorted(by: { $0.count > $1.count }) {
+                let prefix = "\(verb) \(name)"
+                guard trimmed.lowercased().hasPrefix(prefix.lowercased()) else { continue }
+                var rest = trimmed.dropFirst(prefix.count)
+                guard rest.isEmpty || rest.first?.isLetter == false else { continue }
+                rest = rest.drop { $0 == " " || $0 == "," || $0 == ":" }
+                let body = String(rest).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !body.isEmpty else { return nil }
+                let lead = verb == "ask" ? "The person wants to know " : "The person says: "
+                return (name, lead + body)
+            }
+        }
+        return nil
+    }
+
+    /// The on-device model sometimes writes a call as text, such as `memory_remember{fact: "green"}`,
+    /// instead of calling the tool. Only a tool offered on this turn is accepted. Keys may be unquoted.
+    public static func toolCallWrittenAsText(_ text: String, offered: [String]) -> (name: String, arguments: JSONValue)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let open = trimmed.firstIndex(of: "{"), trimmed.hasSuffix("}") else { return nil }
+        let written = trimmed[..<open].trimmingCharacters(in: .whitespaces)
+        guard !written.isEmpty, written.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "." || $0 == "-" }) else { return nil }
+        guard let name = offered.first(where: { $0 == written || WireToolNames.wireName($0) == written }) else { return nil }
+        let body = String(trimmed[open...])
+        if let value = try? JSONValue.parse(body), value.objectValue != nil {
+            return (name, value)
+        }
+        // Quote bare keys: {fact: "x"} becomes {"fact": "x"}.
+        let quoted = body.replacingOccurrences(
+            of: #"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:"#,
+            with: "$1\"$2\":",
+            options: .regularExpression
+        )
+        guard let value = try? JSONValue.parse(quoted), value.objectValue != nil else { return nil }
+        return (name, value)
+    }
+
+    /// The on-device prompt is a flat "role: text" transcript, so replies sometimes start with
+    /// "assistant:" or the bot's name. The label is not part of the answer.
+    static func withoutSpeakerLabel(_ text: String, names: [String]) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for name in names where !name.isEmpty {
+            let label = name.lowercased() + ":"
+            if trimmed.lowercased().hasPrefix(label) {
+                trimmed = String(trimmed.dropFirst(label.count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return trimmed
+    }
+
+    private func instructions(for agent: AgentProfile?, kind: TurnKind, context: ModelContext, compact: Bool) async -> String {
+        var parts = [instructions]
+        if let agent {
+            parts.append("Your name is \(agent.title).")
+        }
+        switch kind {
+        case .chat:
+            break
+        case .botMessage(let from):
+            parts.append("\(from), another bot, sent you the last message. Answer it directly from what you know, including what the person told you earlier in this chat. Give the actual answer, not an acknowledgement. Your reply goes back to \(from).")
+        case .routine where compact:
+            parts.append("This is a scheduled routine, not a chat. Do the checklist and reply with one short message for the person. Reply with exactly NO_REPLY when there is nothing to report.")
+        case .routine:
+            parts.append("This is a scheduled routine, not a chat. Do the checklist, then call heartbeat.respond with notify and a short text, or noReply when there is nothing to report.")
+        }
+        if let builder = self.context {
+            let latest = context.messages.last { $0.role == "user" }?.text ?? ""
+            let extra = await builder(TurnContext(
+                agent: agent,
+                conversationID: context.conversationID.raw,
+                latestUserText: latest,
+                kind: kind,
+                compact: compact
+            ))
+            if !extra.isEmpty {
+                parts.append(extra)
+            }
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     private func makeProvider(_ choice: ProviderChoice) -> any ModelProvider {

@@ -221,6 +221,7 @@ let package = Package(
                 "DurableMemory",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "SystemPackage", package: "swift-system"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -266,6 +267,7 @@ let package = Package(
             name: "AgentAppCoreTests",
             dependencies: [
                 "AgentAppCore",
+                "DurableFoundationModels",
                 "DurableCore",
                 "DurableStore",
                 "DurableSecurity",

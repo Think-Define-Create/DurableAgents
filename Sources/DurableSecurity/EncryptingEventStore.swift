@@ -105,7 +105,7 @@ public actor EncryptingEventStore: EventStore {
         switch error {
         case .shredded, .missingKey:
             return true
-        case .malformedCiphertext:
+        case .malformedCiphertext, .keyUnavailable:
             return false
         }
     }
@@ -118,7 +118,7 @@ public actor EncryptingEventStore: EventStore {
             throw SecurityError.malformedCiphertext("event \(event.globalSeq) is not an AES-GCM payload")
         }
         let key = try await keys.loadKey(for: event.stream.raw)
-        let plain = try AESGCM.open(boxed, key: key)
+        let plain = try AESGCM.open(boxed, key: key, scope: event.stream.raw)
         guard let text = String(data: plain, encoding: .utf8) else {
             throw SecurityError.malformedCiphertext("event \(event.globalSeq) did not decrypt to UTF-8")
         }

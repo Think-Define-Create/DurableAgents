@@ -215,6 +215,8 @@ import Darwin
     #expect(overview.inbox == (try await session.inbox()))
     #expect(overview.inbox.count == 1)
     #expect(overview.runningAgents == 1)
+    #expect(overview.previews[agent.id]?.text == overview.messages.last?.text)
+    #expect(overview.previews[idle.id] == nil)
     let empty = try await session.overview(for: idle.id)
     #expect(empty.messages.isEmpty)
     #expect(empty.usage == (try await session.usage(for: idle.id)))

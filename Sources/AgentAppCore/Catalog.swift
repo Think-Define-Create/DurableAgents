@@ -63,6 +63,9 @@ public struct ProviderChoice: Codable, Sendable, Equatable {
     }
 
     public static let apple = ProviderChoice(kind: .apple, model: "apple-foundation")
+
+    /// Apple's Private Cloud Compute model (iOS 27). The prompt leaves the device, so on-device only blocks it.
+    public static let applePrivateCloud = ProviderChoice(kind: .apple, model: "apple-private-cloud")
 }
 
 public enum OnDevicePolicy {
@@ -70,9 +73,16 @@ public enum OnDevicePolicy {
         switch choice.kind {
         case .anthropic, .openai, .compatible:
             return true
-        case .scripted, .apple:
+        case .apple:
+            return choice.model == ProviderChoice.applePrivateCloud.model
+        case .scripted:
             return false
         }
+    }
+
+    /// Apple's on-device model: a 4,096-token window and weak at long tool lists, so its prompt is trimmed.
+    public static func isSmallModel(_ choice: ProviderChoice) -> Bool {
+        choice.kind == .apple && choice.model == ProviderChoice.apple.model
     }
 
     /// Network tools and HTTP MCP are refused. Local stdio MCP, EventKit, and contacts stay available.

@@ -20,6 +20,34 @@ public struct SendOutcome: Sendable, Equatable {
     }
 }
 
+/// The latest transcript line of one agent, for a conversation list.
+public struct AgentPreview: Sendable, Equatable {
+    public var role: String
+    public var text: String
+    public var at: Date
+
+    public init(role: String, text: String, at: Date) {
+        self.role = role
+        self.text = text
+        self.at = at
+    }
+}
+
+/// One message an agent sent to another bot. The reply is the tool message with `callID`.
+public struct BotExchange: Sendable, Equatable {
+    public var callID: String
+    public var toAgentID: String?
+    public var toName: String
+    public var message: String
+
+    public init(callID: String, toAgentID: String?, toName: String, message: String) {
+        self.callID = callID
+        self.toAgentID = toAgentID
+        self.toName = toName
+        self.message = message
+    }
+}
+
 /// Everything a screen refresh needs, built from one read of the log.
 public struct SessionOverview: Sendable, Equatable {
     public var inbox: [InboxItem]
@@ -27,6 +55,10 @@ public struct SessionOverview: Sendable, Equatable {
     public var events: [RunEvent]
     public var usage: UsageSummary?
     public var runningAgents: Int
+    /// Keyed by agent id. Agents without a conversation have no entry.
+    public var previews: [String: AgentPreview] = [:]
+    /// Messages this agent sent to other bots, keyed by the tool call id of the reply.
+    public var exchanges: [String: BotExchange] = [:]
 
     public var widget: WidgetSnapshot {
         WidgetSnapshot(pendingApprovals: inbox.count, runningAgents: runningAgents, prompts: inbox.map(\.prompt))
@@ -48,6 +80,9 @@ public actor AgentSession {
     private let secrets: any SecretStore
     private let modelOverride: (any ModelStep)?
     private let routing: RoutingModelStep
+    private let roster: AgentRoster
+    /// Fires journaled timers, such as a retry after a failed tool, while the app is running.
+    private let timers = TimerPump()
     private var extraTools: [Tool] = []
     private var mcpServer: DurableMCPServer?
     private var loopback: MCPLoopbackServer?
@@ -64,7 +99,10 @@ public actor AgentSession {
         keys: (any ConversationKeyProvider)? = nil,
         model: (any ModelStep)? = nil,
         foundationModelsLinked: Bool = false,
-        apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)? = nil
+        apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)? = nil,
+        instructions: String = RoutingModelStep.defaultInstructions,
+        context: ContextBuilder? = nil,
+        extraTools: [Tool] = []
     ) async throws -> AgentSession {
         let directory = try AgentDirectory.load(from: directoryURL)
         return try await AgentSession(
@@ -76,7 +114,10 @@ public actor AgentSession {
             keys: keys,
             model: model,
             foundationModelsLinked: foundationModelsLinked,
-            apple: apple
+            apple: apple,
+            instructions: instructions,
+            context: context,
+            extraTools: extraTools
         )
     }
 
@@ -89,10 +130,23 @@ public actor AgentSession {
         keys: (any ConversationKeyProvider)?,
         model: (any ModelStep)?,
         foundationModelsLinked: Bool,
-        apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)?
+        apple: (@Sendable (ProviderChoice) -> (any ModelProvider)?)?,
+        instructions: String,
+        context: ContextBuilder?,
+        extraTools: [Tool]
     ) async throws {
         self.store = store
         self.directoryURL = directoryURL
+        // Every bot owns a conversation from the start, so another bot can message it before
+        // the person has ever opened its chat.
+        var directory = directory
+        let unassigned = directory.agents.indices.filter { directory.agents[$0].conversationID == nil }
+        for index in unassigned {
+            directory.agents[index].conversationID = ConversationID.generate().raw
+        }
+        if !unassigned.isEmpty {
+            try directory.save(to: directoryURL)
+        }
         self.directory = directory
         self.hosts = hosts
         self.secrets = secrets
@@ -106,13 +160,20 @@ public actor AgentSession {
         self.transcript = transcript
         let mailbox = WebApprovalChannel()
         self.mailbox = mailbox
+        let roster = AgentRoster()
+        await roster.update(directory.agents)
+        self.roster = roster
+        self.extraTools = extraTools
         self.routing = RoutingModelStep(
             table: table,
             policy: policy,
             secrets: secrets,
             transcript: transcript,
             foundationModelsLinked: foundationModelsLinked,
-            apple: apple
+            apple: apple,
+            instructions: instructions,
+            roster: roster,
+            context: context
         )
         for agent in directory.agents {
             if let conversationID = agent.conversationID {
@@ -124,11 +185,18 @@ public actor AgentSession {
             hosts: hosts,
             policy: policy,
             allowlist: WebAllowlist(hosts: directory.settings.webAllowHosts),
-            extra: [],
+            extra: extraTools,
             mailbox: mailbox,
+            timers: timers,
             model: model ?? routing
         )
         self.lastRecovery = try await engine.recover()
+    }
+
+    /// Saves the directory and shows the routing step the new agent list.
+    private func saveDirectory() async throws {
+        try directory.save(to: directoryURL)
+        await roster.update(directory.agents)
     }
 
     public func agents(includeArchived: Bool = false) -> [AgentProfile] {
@@ -139,24 +207,28 @@ public actor AgentSession {
         directory.settings
     }
 
-    public func create(title: String, provider: ProviderChoice = .demo) throws -> AgentProfile {
+    public func create(title: String, provider: ProviderChoice = .demo) async throws -> AgentProfile {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { throw AgentError.emptyTitle }
-        let profile = AgentProfile(
+        var profile = AgentProfile(
             id: "agent_" + UUID().uuidString.lowercased(),
             title: trimmed,
             provider: provider
         )
+        profile.conversationID = ConversationID.generate().raw
         directory.upsert(profile)
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
+        if let conversationID = profile.conversationID {
+            await table.bind(conversationID, provider)
+        }
         return profile
     }
 
-    public func archive(_ id: String) throws {
+    public func archive(_ id: String) async throws {
         guard var profile = directory.agent(id) else { throw AgentError.missingAgent }
         profile.archived = true
         directory.upsert(profile)
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
     }
 
     public func fork(_ id: String) async throws -> AgentProfile {
@@ -173,7 +245,7 @@ public actor AgentSession {
             await table.bind(forked.raw, source.provider)
         }
         directory.upsert(copy)
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         return copy
     }
 
@@ -181,7 +253,7 @@ public actor AgentSession {
         guard var profile = directory.agent(id) else { throw AgentError.missingAgent }
         profile.provider = choice
         directory.upsert(profile)
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         if let conversationID = profile.conversationID {
             await table.bind(conversationID, choice)
         }
@@ -190,7 +262,18 @@ public actor AgentSession {
     public func send(_ id: String, text: String) async throws -> SendOutcome {
         guard var profile = directory.agent(id) else { throw AgentError.missingAgent }
         if profile.archived { throw AgentError.archived }
+        // Bound before the turn, so two bots sending at once never read each other's "pending" choice.
+        if profile.conversationID == nil {
+            profile.conversationID = ConversationID.generate().raw
+            directory.upsert(profile)
+            try await saveDirectory()
+            await roster.update(directory.agents)
+        }
         await table.prepare(profile.provider)
+        await roster.prepare(profile.id)
+        if let raw = profile.conversationID {
+            await table.bind(raw, profile.provider)
+        }
         let existing = profile.conversationID.map { ConversationID(raw: $0) }
         await transcript.beginTurn(conversationID: profile.conversationID)
         let requestID = "req_" + UUID().uuidString.lowercased()
@@ -203,7 +286,7 @@ public actor AgentSession {
         if profile.conversationID == nil {
             profile.conversationID = result.conversationID.raw
             directory.upsert(profile)
-            try directory.save(to: directoryURL)
+            try await saveDirectory()
         }
         await table.bind(result.conversationID.raw, profile.provider)
         return SendOutcome(
@@ -275,20 +358,20 @@ public actor AgentSession {
     public func setOnDeviceOnly(_ on: Bool) async throws {
         await policy.set(on)
         directory.settings.onDeviceOnly = on
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         try await rebuild()
     }
 
     public func setAllowHosts(_ hosts: [String]) async throws {
         directory.settings.webAllowHosts = hosts
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         try await rebuild()
     }
 
     public func updateSettings(_ settings: AppSettings) async throws {
         directory.settings = settings
         await policy.set(settings.onDeviceOnly)
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         try await rebuild()
     }
 
@@ -329,7 +412,7 @@ public actor AgentSession {
             try await keys.shred(scope)
         }
         directory.agents.removeAll { $0.id == id }
-        try directory.save(to: directoryURL)
+        try await saveDirectory()
         engine = try await Self.makeEngine(
             store: store,
             hosts: hosts,
@@ -337,6 +420,7 @@ public actor AgentSession {
             allowlist: WebAllowlist(hosts: directory.settings.webAllowHosts),
             extra: extraTools,
             mailbox: mailbox,
+            timers: timers,
             model: modelOverride ?? routing
         )
         lastRecovery = try await engine.recover()
@@ -422,12 +506,30 @@ public actor AgentSession {
                 running += 1
             }
         }
+        var latest: [String: AgentPreview] = [:]
+        for event in all where event.type == EventType.messageAppended {
+            if var message = try? EventCodec.transcriptMessage(event) {
+                if message.role == "user", let bot = BotMessage.decode(message.text) {
+                    let sender = directory.agent(bot.from)?.title ?? "Another bot"
+                    message.role = "bot"
+                    message.text = "\(sender): \(bot.text)"
+                }
+                latest[event.stream.raw] = AgentPreview(role: message.role, text: message.text, at: event.recordedAt)
+            }
+        }
+        var previews: [String: AgentPreview] = [:]
+        for agent in directory.agents {
+            if let raw = agent.conversationID, let preview = latest[raw] {
+                previews[agent.id] = preview
+            }
+        }
         var overview = SessionOverview(
             inbox: ApprovalInbox.pending(events: all, agents: directory.agents, now: now),
             messages: [],
             events: [],
             usage: nil,
-            runningAgents: running
+            runningAgents: running,
+            previews: previews
         )
         guard let id, let profile = directory.agent(id) else {
             return overview
@@ -440,6 +542,19 @@ public actor AgentSession {
         let conversation = all.filter { $0.stream == stream }
         overview.messages = try conversation.compactMap { try EventCodec.transcriptMessage($0) }
         overview.events = conversation.map { RunEvent(id: $0.globalSeq, type: $0.type, summary: $0.type) }
+        for event in conversation where event.type == EventType.subagentStarted && event.payload["name"]?.stringValue == BotMessage.toolName {
+            guard let callID = event.payload["callID"]?.stringValue else { continue }
+            let arguments = event.payload["arguments"]
+            let goal = arguments?["goal"]?.stringValue.flatMap(BotMessage.decode)
+            let name = arguments?["bot"]?.stringValue ?? ""
+            let receiver = goal.flatMap { directory.agent($0.to) }
+            overview.exchanges[callID] = BotExchange(
+                callID: callID,
+                toAgentID: receiver?.id,
+                toName: receiver?.title ?? name,
+                message: arguments?["message"]?.stringValue ?? goal?.text ?? ""
+            )
+        }
         overview.usage = UsageLedger.summarize(events: conversation, provider: profile.provider.kind)
         return overview
     }
@@ -461,6 +576,7 @@ public actor AgentSession {
             allowlist: WebAllowlist(hosts: directory.settings.webAllowHosts),
             extra: extraTools,
             mailbox: mailbox,
+            timers: timers,
             model: modelOverride ?? routing
         )
         lastRecovery = try await engine.recover()
@@ -486,16 +602,45 @@ public actor AgentSession {
         allowlist: WebAllowlist,
         extra: [Tool],
         mailbox: WebApprovalChannel,
+        timers: TimerPump,
         model: any ModelStep
     ) async throws -> Engine {
         let builtin = BuiltinTools.make(hosts: hosts, policy: policy, allowlist: allowlist)
-        return try await Engine(
+        let engine = try await Engine(
             store: store,
             tools: builtin + extra,
             model: model,
             retryPolicy: .standard,
+            timers: timers,
             approvals: mailbox,
             leaseTTL: .seconds(86_400)
         )
+        await timers.attach(engine)
+        return engine
+    }
+}
+
+/// Wakes the engine when a journaled timer is due, so a retry after a failed step runs on its own
+/// instead of waiting for the next launch or background wake. Timers the app missed while it was
+/// closed still fire from `recover` and `pumpTimers`.
+public actor TimerPump: TimerScheduling {
+    private weak var engine: Engine?
+
+    public init() {}
+
+    func attach(_ engine: Engine) {
+        self.engine = engine
+    }
+
+    public func schedule(name: String, fireAt: Date) async {
+        Task { await self.fire(at: fireAt) }
+    }
+
+    private func fire(at date: Date) async {
+        let wait = date.timeIntervalSinceNow
+        if wait > 0 {
+            try? await Task.sleep(for: .seconds(wait + 0.05))
+        }
+        _ = try? await engine?.pumpTimers()
     }
 }

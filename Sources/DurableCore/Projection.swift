@@ -71,6 +71,8 @@ struct SubagentRecord: Equatable {
     var conversationID: String
     var finished: Bool
     var finalText: String?
+    var name: String = ""
+    var arguments: JSONValue = .null
 }
 
 struct FoldedRun {
@@ -435,8 +437,16 @@ struct Projection {
             else {
                 throw DurableError.invariant("subagent.started is missing fields at seq \(event.globalSeq)")
             }
+            let name = event.payload["name"]?.stringValue ?? ""
+            let arguments = event.payload["arguments"] ?? .object(["goal": event.payload["goal"] ?? .string("")])
             try updateRun(event, runID: event.payload["runID"]?.stringValue) { run in
-                run.subagents[callID] = SubagentRecord(conversationID: child, finished: false, finalText: nil)
+                run.subagents[callID] = SubagentRecord(
+                    conversationID: child,
+                    finished: false,
+                    finalText: nil,
+                    name: name,
+                    arguments: arguments
+                )
             }
         case EventType.subagentFinished:
             guard let callID = event.payload["callID"]?.stringValue else {
@@ -451,6 +461,20 @@ struct Projection {
                 record.finished = true
                 record.finalText = event.payload["finalText"]?.stringValue
                 run.subagents[callID] = record
+            }
+            // The child's answer is the call's result, so a model replaying the run can pair them.
+            if let runID = event.payload["runID"]?.stringValue {
+                var conversation = conversation(event.stream)
+                if let record = conversation.runs[runID]?.subagents[callID] {
+                    conversation.toolRecords.append(ToolRecord(
+                        runID: runID,
+                        name: record.name,
+                        callID: callID,
+                        arguments: record.arguments,
+                        output: .string(record.finalText ?? "")
+                    ))
+                    conversations[event.stream.raw] = conversation
+                }
             }
         case EventType.retentionHold, EventType.retentionPurged, EventType.approvalEscalated, EventType.importNote, EventType.deliveryDeadLettered, EventType.runBudgetExceeded, EventType.routineDefined, EventType.routineFired, EventType.routineSkipped, EventType.identitySet, EventType.identityProposed, EventType.identityResolved, EventType.identityAssembled, EventType.skillDefined, EventType.skillProposed, EventType.skillResolved, EventType.skillActivated, EventType.skillResource, EventType.notificationDecided, EventType.approvalPolicy:
             return

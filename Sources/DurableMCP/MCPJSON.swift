@@ -108,14 +108,17 @@ public struct MCPListedTool: Sendable, Equatable {
 public struct MCPToolOutput: Sendable, Equatable {
     public var texts: [String]
     public var isError: Bool
+    /// The server task that produced this result, when the call ran as a 2026-07-28 task.
+    public var taskID: String?
 
-    public init(texts: [String], isError: Bool) {
+    public init(texts: [String], isError: Bool, taskID: String? = nil) {
         self.texts = texts
         self.isError = isError
+        self.taskID = taskID
     }
 
     public var journaled: JSONValue {
-        .object([
+        var fields: [String: JSONValue] = [
             "content": .array(texts.map { text in
                 .object([
                     "text": .string(text),
@@ -123,10 +126,34 @@ public struct MCPToolOutput: Sendable, Equatable {
                 ])
             }),
             "isError": .bool(isError),
-        ])
+        ]
+        if let taskID {
+            fields["taskId"] = .string(taskID)
+        }
+        return .object(fields)
     }
 }
 
 public protocol MCPToolCaller: Sendable {
     func callTool(name: String, arguments: JSONValue) async throws -> MCPToolOutput
+    /// The bridge calls this form. `context` carries the idempotency key and the task journal.
+    func callTool(name: String, arguments: JSONValue, context: MCPCallContext) async throws -> MCPToolOutput
+    /// Polls a task recorded before a crash.
+    func resumeTask(_ record: MCPTaskRecord, context: MCPCallContext) async throws -> MCPToolOutput
+    /// True when the caller already times out each request, so the bridge must not cap the whole call.
+    var timesOutPerRequest: Bool { get async }
+}
+
+extension MCPToolCaller {
+    public func callTool(name: String, arguments: JSONValue, context: MCPCallContext) async throws -> MCPToolOutput {
+        try await callTool(name: name, arguments: arguments)
+    }
+
+    public func resumeTask(_ record: MCPTaskRecord, context: MCPCallContext) async throws -> MCPToolOutput {
+        throw MCPCallError("mcp tasks need a 2026-07-28 server")
+    }
+
+    public var timesOutPerRequest: Bool {
+        get async { false }
+    }
 }

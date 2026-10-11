@@ -153,3 +153,36 @@ private func lease(_ store: any EventStore) async throws -> FenceToken {
     let acquired = try await store.acquireLease(owner: UUID(), pid: 1, ttl: .seconds(60))
     return FenceToken(owner: acquired.owner, epoch: acquired.epoch)
 }
+
+/// The Keychain provider makes a new key when one is missing, so after a shred the old ciphertext
+/// meets a different key. That must read as shredded, not fail the whole store.
+private actor RegeneratingKeys: ConversationKeyProvider {
+    private var keys: [String: Data] = [:]
+
+    func loadKey(for scope: String) async throws -> Data {
+        if let key = keys[scope] { return key }
+        let made = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        keys[scope] = made
+        return made
+    }
+
+    func shred(_ scope: String) async throws {
+        keys[scope] = nil
+    }
+}
+
+@Test func aShreddedConversationIsSkippedEvenWhenTheProviderMakesANewKey() async throws {
+    let keys = RegeneratingKeys()
+    let inner = InMemoryEventStore(storeID: "regen")
+    let writer = EncryptingEventStore(inner: inner, keys: keys)
+    let fence = try await lease(writer)
+    for stream in ["kept", "gone"] {
+        _ = try await writer.commit(fence: fence, stream: StreamID(stream), events: [
+            EventDraft(type: EventType.messageAppended, payload: .object(["text": .string(stream)])),
+        ])
+    }
+    try await keys.shred("gone")
+    let reader = EncryptingEventStore(inner: inner, keys: keys, omitShredded: true)
+    let events = try await reader.readAll()
+    #expect(events.map { $0.payload["text"]?.stringValue } == ["kept"])
+}
