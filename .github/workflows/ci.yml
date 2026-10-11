@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux (Swift 6.2)
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite
+        run: apt-get update -qq && apt-get install -y -qq libsqlite3-dev
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Test
+        run: swift test

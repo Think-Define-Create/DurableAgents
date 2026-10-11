@@ -39,6 +39,10 @@ public actor Engine {
     @TaskLocal private static var policyOverride: RetryPolicy?
     private let leaseTTL: Duration
     private var keepAliveTask: Task<Void, Never>?
+    /// The log folded through `foldedThrough`. Each load applies only the newer events, so a step
+    /// costs the size of what changed, not the size of the whole history.
+    private var folded = Projection()
+    private var foldedThrough: UInt64 = 0
     /// Set when a renewal fails because the fence no longer matches. Later commits are rejected.
     public private(set) var fencedOut = false
 
@@ -1989,7 +1993,31 @@ public actor Engine {
     }
 
     private func load() async throws -> Projection {
-        try Projection.fold(try await store.readAll())
+        let fresh = try await store.readAll(after: foldedThrough)
+        // Another task may have advanced the fold while this read was in flight.
+        let newer = fresh.filter { $0.globalSeq > foldedThrough }
+        guard !newer.isEmpty else { return folded }
+        if newer.contains(where: { $0.type == EventType.retentionPurged }) {
+            // A purge rewrote older payloads in place, so the fold is rebuilt from the start.
+            let all = try await store.readAll()
+            folded = try Projection.fold(all)
+            foldedThrough = all.last?.globalSeq ?? 0
+            return folded
+        }
+        var next = folded
+        for event in newer {
+            try next.apply(event)
+        }
+        folded = next
+        foldedThrough = newer.last?.globalSeq ?? foldedThrough
+        return folded
+    }
+
+    /// Drops the in-memory fold so the next read replays the whole log. Call it after changing
+    /// stored events outside the engine, for example after shredding a conversation's key.
+    public func reloadState() {
+        folded = Projection()
+        foldedThrough = 0
     }
 
     private func ensureWritable() throws {

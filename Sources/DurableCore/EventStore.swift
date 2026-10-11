@@ -18,8 +18,18 @@ public protocol EventStore: Sendable {
 
     func readAll() async throws -> [EventEnvelope]
 
+    /// Events with a global sequence greater than `globalSeq`, in order. The engine reads only
+    /// what is new since its last read. The default filters `readAll()`; stores should override it.
+    func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope]
+
     func read(stream: StreamID) async throws -> [EventEnvelope]
 
     /// Replaces one stored payload. Sequence numbers stay put. Used by retention purge.
     func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws
+}
+
+extension EventStore {
+    public func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope] {
+        try await readAll().filter { $0.globalSeq > globalSeq }
+    }
 }

@@ -64,6 +64,11 @@ public actor EncryptingEventStore: EventStore {
         try await decryptAll(try await inner.read(stream: stream))
     }
 
+    /// Only the new events are decrypted, which is most of what the engine's incremental read saves.
+    public func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope] {
+        try await decryptAll(try await inner.readAll(after: globalSeq))
+    }
+
     public func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws {
         let stored = try await inner.readAll()
         guard let event = stored.first(where: { $0.globalSeq == globalSeq }) else {

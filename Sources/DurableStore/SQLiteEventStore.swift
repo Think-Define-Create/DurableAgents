@@ -196,6 +196,12 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    public func readAll(after globalSeq: UInt64) async throws -> [EventEnvelope] {
+        try await dbQueue.read { database in
+            try Self.fetchEvents(database, stream: nil, after: globalSeq)
+        }
+    }
+
     public func rewritePayload(globalSeq: UInt64, payload: JSONValue, fence: FenceToken) async throws {
         try await dbQueue.write { database in
             let existing = try Self.fetchLease(database)
@@ -276,9 +282,18 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         )
     }
 
-    private static func fetchEvents(_ database: Database, stream: StreamID?) throws -> [EventEnvelope] {
+    private static func fetchEvents(_ database: Database, stream: StreamID?, after: UInt64? = nil) throws -> [EventEnvelope] {
         let rows: [Row]
-        if let stream {
+        if let after {
+            rows = try Row.fetchAll(
+                database,
+                sql: """
+                SELECT global_seq, stream, stream_seq, type, schema_version, recorded_at, payload
+                FROM events WHERE global_seq > ? ORDER BY global_seq
+                """,
+                arguments: [Int64(after)]
+            )
+        } else if let stream {
             rows = try Row.fetchAll(
                 database,
                 sql: """

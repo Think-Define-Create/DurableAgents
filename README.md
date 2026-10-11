@@ -335,6 +335,7 @@ These follow the redesign notes, not a table-compatible port of Pi Durable:
 
 - The journal is the source of truth. `durable-import` copies a pi-durable SQLite file in one direction and reports what it drops. The tables are not the runtime format.
 - The fence is store-wide. Each conversation has its own lock inside the engine, so one agent's model call or tool body does not hold up another agent. Recovery, timer pumps and signals take every lock. Reads and single appends take none. A subagent call never waits for another conversation's lock: a busy target answers that it is busy, so two agents asking each other cannot deadlock. Group commit is later work.
+- The engine keeps its folded view of the log in memory and reads only events after the last one it applied (`EventStore.readAll(after:)`), so a step costs what changed rather than the whole history. Through `EncryptingEventStore` that also means only new events are decrypted. A `retention.purged` event makes it refold from the start, and a new engine folds the log once at open. `Engine.reloadState()` drops the fold after stored events change outside the engine.
 - Transactional tools do not run inside an open SQLite transaction callback. Their writes are returned to the engine and committed with the result, which is the atomic boundary.
 - Encryption, redaction, and retention wrap the log. Tracing is a hook, not an OpenTelemetry SDK export.
 - Transcript messages are a small versioned JSON shape owned here. They are not the Pi message schema.

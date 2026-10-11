@@ -186,3 +186,27 @@ private actor RegeneratingKeys: ConversationKeyProvider {
     let events = try await reader.readAll()
     #expect(events.map { $0.payload["text"]?.stringValue } == ["kept"])
 }
+
+/// The engine folds the log incrementally. A purge rewrites old payloads in place, so an engine
+/// that is still open must rebuild its view instead of keeping the purged text.
+@Test func anOpenEngineForgetsPurgedMessages() async throws {
+    let store = InMemoryEventStore(storeID: "purge-live")
+    let engine = try await Engine(store: store, leaseTTL: .seconds(600))
+    let sent = try await engine.submit(Submission(
+        requestID: "r1",
+        text: "secret-to-purge",
+        script: Script(steps: [.finish("ok")])
+    ))
+    #expect(try await engine.snapshot(sent.conversationID).messages.contains { $0.text == "secret-to-purge" })
+
+    let purged = try await Retention.purge(
+        store,
+        fence: await engine.currentFence(),
+        stream: .conversation(sent.conversationID),
+        policy: RetentionPolicy(maxAge: 60, eventTypes: [EventType.messageAppended]),
+        now: Date().addingTimeInterval(100_000)
+    )
+    #expect(purged > 0)
+    #expect(try await !engine.snapshot(sent.conversationID).messages.contains { $0.text == "secret-to-purge" })
+    await engine.close()
+}
