@@ -88,15 +88,67 @@ public enum ToolDates {
     }
 
     /// Phrases such as "tomorrow at 9am", which small models often write instead of ISO dates.
-    public static func natural(_ text: String) -> Date? {
+    public static func natural(_ text: String, now: Date = Date(), calendar: Calendar = .current) -> Date? {
         #if canImport(Darwin)
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) else { return nil }
-        let range = NSRange(text.startIndex..., in: text)
-        guard let match = detector.firstMatch(in: text, range: range), let date = match.date else { return nil }
-        return date
-        #else
-        return nil
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) {
+            let range = NSRange(text.startIndex..., in: text)
+            if let date = detector.firstMatch(in: text, range: range)?.date {
+                return date
+            }
+        }
         #endif
+        // Linux Foundation has no NSDataDetector, so common English phrases are read here.
+        return simpleNatural(text, now: now, calendar: calendar)
+    }
+
+    /// "tomorrow at 9am", "today at 5:30 pm", "friday at noon", "at 3pm". A time is required, so a
+    /// bare "tomorrow" is not guessed. A time with no day is today if still ahead, else tomorrow.
+    public static func simpleNatural(_ text: String, now: Date, calendar: Calendar) -> Date? {
+        let lower = text.lowercased()
+        var hour: Int?
+        var minute = 0
+        if lower.range(of: #"\bnoon\b"#, options: .regularExpression) != nil {
+            hour = 12
+        } else if lower.range(of: #"\bmidnight\b"#, options: .regularExpression) != nil {
+            hour = 0
+        } else if let match = lower.range(of: #"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)"#, options: .regularExpression)
+            ?? lower.range(of: #"\bat\s+(\d{1,2})(?::(\d{2}))?\b"#, options: .regularExpression)
+        {
+            let piece = String(lower[match]).replacingOccurrences(of: "at", with: "").trimmingCharacters(in: .whitespaces)
+            let digits = piece.prefix { $0.isNumber || $0 == ":" }
+            let parts = digits.split(separator: ":")
+            guard let first = parts.first.flatMap({ Int($0) }), first <= 23 else { return nil }
+            var value = first
+            if parts.count > 1, let minutes = Int(parts[1]), minutes < 60 { minute = minutes }
+            if piece.contains("p"), value < 12 { value += 12 }
+            if piece.contains("a"), value == 12 { value = 0 }
+            hour = value
+        }
+        guard let hour else { return nil }
+
+        var day = calendar.startOfDay(for: now)
+        var dayNamed = false
+        if lower.range(of: #"\btomorrow\b"#, options: .regularExpression) != nil {
+            day = calendar.date(byAdding: .day, value: 1, to: day) ?? day
+            dayNamed = true
+        } else if lower.range(of: #"\b(today|tonight)\b"#, options: .regularExpression) != nil {
+            dayNamed = true
+        } else {
+            let names = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+            for (index, name) in names.enumerated() where lower.range(of: "\\b\(name)\\b", options: .regularExpression) != nil {
+                let today = calendar.component(.weekday, from: now) - 1
+                var ahead = (index - today + 7) % 7
+                if ahead == 0 { ahead = 7 }
+                day = calendar.date(byAdding: .day, value: ahead, to: day) ?? day
+                dayNamed = true
+                break
+            }
+        }
+        guard var date = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day) else { return nil }
+        if !dayNamed, date <= now {
+            date = calendar.date(byAdding: .day, value: 1, to: date) ?? date
+        }
+        return date
     }
 
     /// The local-time form tools accept, such as "2026-10-11T09:00".

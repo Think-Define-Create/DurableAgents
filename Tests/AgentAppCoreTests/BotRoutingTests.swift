@@ -517,3 +517,21 @@ private actor FlakyOnce {
     let overview = try await session.overview(for: profile.id)
     #expect(overview.exchanges.values.first?.message == "The person wants to know what my dog's name is.")
 }
+
+/// The parser Linux relies on, since its Foundation has no NSDataDetector.
+@Test func simplePhrasesGiveADateWithoutTheSystemDetector() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "America/Phoenix")!
+    // Saturday 2026-10-10 15:00 in Phoenix.
+    let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 10, day: 10, hour: 15)))
+    func local(_ text: String) -> String? {
+        ToolDates.simpleNatural(text, now: now, calendar: calendar).map { ToolDates.describe($0, timeZone: calendar.timeZone) }
+    }
+    #expect(local("remind me tomorrow at 9am") == "Sun 2026-10-11 09:00")
+    #expect(local("today at 5:30 pm") == "Sat 2026-10-10 17:30")
+    #expect(local("call mom friday at noon") == "Fri 2026-10-16 12:00")
+    #expect(local("at 9") == "Sun 2026-10-11 09:00")
+    #expect(local("at 4pm") == "Sat 2026-10-10 16:00")
+    #expect(local("tomorrow") == nil)
+    #expect(local("buy 2 apples") == nil)
+}

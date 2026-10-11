@@ -554,8 +554,8 @@ private enum Checks {
         throw DiagnosticSkip(reason: "Apple's model does not run in the simulator")
         #elseif canImport(FoundationModels)
         if #available(iOS 26, macOS 26, *) {
-            guard FoundationModelsStep.isAvailable() else {
-                throw DiagnosticSkip(reason: FoundationModelsStep.unavailableReason() ?? "Apple Intelligence is unavailable")
+            guard FoundationModelsSupport.isAvailable() else {
+                throw DiagnosticSkip(reason: FoundationModelsSupport.unavailableReason() ?? "Apple Intelligence is unavailable")
             }
             return FoundationModelsProvider(instructions: "", bridgesRequestTools: true)
         }

@@ -270,7 +270,7 @@ enum SelfTest {
     private static func availability() -> String {
         #if canImport(FoundationModels)
         if #available(iOS 26, macOS 26, *) {
-            return FoundationModelsStep.unavailableReason() ?? "available"
+            return FoundationModelsSupport.unavailableReason() ?? "available"
         }
         #endif
         return "not compiled"

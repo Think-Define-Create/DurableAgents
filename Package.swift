@@ -69,7 +69,7 @@ let package = Package(
         ),
         .target(
             name: "DurableFoundationModels",
-            dependencies: ["DurableCore", "ModelKit"],
+            dependencies: ["DurableCore", "ModelKit", "AgentLoop"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

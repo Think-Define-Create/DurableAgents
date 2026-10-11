@@ -12,8 +12,8 @@ jobs:
     container: swift:6.2-noble
     steps:
       - uses: actions/checkout@v4
-      - name: Install SQLite
-        run: apt-get update -qq && apt-get install -y -qq libsqlite3-dev
+      - name: Install SQLite (the import tests use the sqlite3 tool)
+        run: apt-get update -qq && apt-get install -y -qq libsqlite3-dev sqlite3
       - name: Build
         run: swift build
       - name: Test

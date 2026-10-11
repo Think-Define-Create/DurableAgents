@@ -13,8 +13,8 @@ import Testing
 struct LiveOnDevice {
     @available(macOS 26, iOS 26, *)
     @Test func botsUseSoulMemoryToolsEachOtherAndRoutines() async throws {
-        guard FoundationModelsStep.isAvailable() else {
-            Issue.record("on-device model unavailable: \(FoundationModelsStep.unavailableReason() ?? "")")
+        guard FoundationModelsSupport.isAvailable() else {
+            Issue.record("on-device model unavailable: \(FoundationModelsSupport.unavailableReason() ?? "")")
             return
         }
         let store = InMemoryEventStore(storeID: "live-" + UUID().uuidString)
@@ -151,7 +151,7 @@ struct LiveOnDeviceContext {
     /// Earlier turns stay in the conversation, including after the app is closed and reopened.
     @available(macOS 26, iOS 26, *)
     @Test func conversationKeepsItsContextAcrossTurnsAndRelaunch() async throws {
-        guard FoundationModelsStep.isAvailable() else { return }
+        guard FoundationModelsSupport.isAvailable() else { return }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let path = folder.appendingPathComponent("events.sqlite").path

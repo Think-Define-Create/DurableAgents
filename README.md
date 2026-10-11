@@ -13,7 +13,7 @@ It is inspired by [Pi](https://github.com/earendil-works/pi) and Pi Durable (MIT
 | `DurableCore` | Event log, lease, effect journal, scripted runs, and the `ModelStep` protocol. No database and no Apple SDK. |
 | `DurableStore` | `EventStore`: in-memory, and SQLite through [GRDB](https://github.com/groue/GRDB.swift). |
 | `DurableKit` | `@MainActor` conversation model for SwiftUI: messages, run status, pending approval, event log. Observation is used when the SDK has it. |
-| `DurableFoundationModels` | `FoundationModelsStep` when the Apple framework is present. On Linux this target is a stub. |
+| `DurableFoundationModels` | `DurableLanguageModelSession` (a crash-safe `LanguageModelSession`), `DurableTool`, and `FoundationModelsProvider` for Apple's on-device model, Private Cloud Compute, or any iOS 27 `LanguageModel`. On Linux this target is a stub. |
 | `ModelKit` | Provider streaming for Anthropic Messages, OpenAI Responses, and OpenAI-compatible chat. Keys stay in a secret store. |
 | `AgentLoop` | Multi-step loop on the engine: one journaled model checkpoint, parallel safe tools, subagents, forks, compaction. |
 | `CrashProbe` | Small executable the tests kill or restart against a real SQLite file. |
@@ -206,13 +206,36 @@ Keep a per-server allowlist. Do not point a run at a server and expose every too
 
 `ModelStep.plan` returns the same step vocabulary as a script: assistant text, a tool call, an approval, or finish. `ScriptedModelStep` walks a fixed list. `submitTurn` is the model-driven entry point. `submit(Submission)` is unchanged.
 
-`FoundationModelsStep` is compiled only when `FoundationModels` is importable, and its initializer is `@available(iOS 26, macOS 26, *)`. It opens a `LanguageModelSession` with capturing tools. Those tools record the arguments and throw before any side effect. The session surfaces that as `LanguageModelSession.ToolCallError`, and the engine then journals `effect.intent` and runs the real DurableAgents tool. A crash still reconciles from the journal, not from the model.
+`FoundationModelsProvider` is compiled only when `FoundationModels` is importable. It opens a `LanguageModelSession` with capturing tools. Those tools record the arguments and throw before any side effect. The session surfaces that as `LanguageModelSession.ToolCallError`, and the engine then journals `effect.intent` and runs the real DurableAgents tool. A crash still reconciles from the journal, not from the model.
+
+On iOS 27 and macOS 27, `FoundationModelsProvider(model:instructions:)` takes any `LanguageModel`, so a third-party model that conforms to Apple's protocol runs through the same durable loop. Those larger models get the history as a structured `Transcript` (prompts, responses, tool calls, tool outputs). Apple's small on-device model keeps a flat "role: text" prompt, because in testing on macOS 27 it called tools more reliably that way.
+
+### Drop-in durable session
+
+`DurableLanguageModelSession` wraps an ordinary FoundationModels tool set so a chat survives a crash:
+
+```swift
+let session = try await DurableLanguageModelSession(
+    store: try SQLiteEventStore(path: url.path),
+    instructions: "You save notes when asked.",
+    tools: [DurableTool(SaveNote(), effect: .external, requiresApproval: true)]
+)
+_ = try await session.recover()   // at launch: finish an interrupted turn, report a pending approval
+switch try await session.respond(to: "Save a note that says buy milk.") {
+case .text(let reply): print(reply)
+case .needsApproval(let prompt, let token): // ask the person, then
+    _ = try await session.approve(token)
+case .retrying, .failed: break
+}
+```
+
+`DurableTool` keeps your tool's name, description and `@Generable` arguments, and adds the effect kind, approval, and reconcile hook. The tool body runs only after the engine has journaled the call, so a killed app does not send twice. If the model declines to word a reply after a tool succeeded (the on-device guardrail sometimes does), the session answers with the tool's own result.
 
 Each plan uses a new session. The prompt is rebuilt from the durable transcript, because a tool error rolls the Foundation Models transcript back. Check `SystemLanguageModel.default.availability` before using it. `.available` uses the on-device model. `.unavailable(.appleIntelligenceNotEnabled)`, `.unavailable(.deviceNotEligible)`, `.unavailable(.modelNotReady)`, and any other unavailable reason fall back to a scripted model. `EscrowScriptedModel` in DurableKit is a scripted fallback the tests use.
 
 ### On-device limits
 
-Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. `FoundationModelsStep` keeps the instructions short and sends only the most recent transcript lines, clipped to a character budget, into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device.
+Apple's on-device foundation model has a context window of **4096 tokens per session**. Instructions, the prompt, tool names, descriptions, parameter schemas, and guided-generation guides all count. `LanguageModelError.contextSizeExceeded` stops the session when that window is exceeded. `FoundationModelsProvider` keeps the instructions short and sends only the most recent messages, clipped to a character budget, into a fresh session. `SystemLanguageModel.contextSize` and `tokenCount(for:)` are the APIs to measure a prompt on device.
 
 On iOS 27 and macOS 27, `FoundationModelsProvider(privateCloud: true)` runs on Apple's `PrivateCloudComputeLanguageModel` instead. The prompt budget follows that model's `contextSize`, so more history fits. The request leaves the device, so `OnDevicePolicy.blocksCloud` treats `ProviderChoice.applePrivateCloud` as a cloud choice. It needs Apple's managed `com.apple.developer.private-cloud-compute` entitlement, which a developer requests from Apple. Without it the framework stops the process with a fatal error rather than throwing, so the provider only calls it when the app's Info.plist sets `DurableAgentsPrivateCloudEntitled` to true, and otherwise stays on device. `FoundationModelsSupport.privateCloudAvailable` checks that key and whether the model can answer now.
 
@@ -283,7 +306,7 @@ To run the package suite in Xcode, open `Package.swift`, wait for package resolu
 
 Formatting is [swift-format](https://github.com/swiftlang/swift-format) with the `.swift-format` file in the repo root. SwiftLint is not used. No GitHub Actions workflow is required to build or test.
 
-On Linux, install `libsqlite3-dev`, a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
+On Linux, install `libsqlite3-dev`, `sqlite3` (the importer tests use it), a C++ toolchain (`g++` or `libstdc++-dev`, required to build swift-crypto), and a Swift 6.1+ toolchain, then run the same `swift test`.
 
 ```bash
 swift run durable-audit tip --database events.sqlite
