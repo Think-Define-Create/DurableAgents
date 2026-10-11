@@ -116,7 +116,8 @@ enum ModernFixture {
         else {
             return
         }
-        print(text)
-        fflush(stdout)
+        // FileHandle writes go straight to the descriptor, so no flush is needed. glibc's `stdout`
+        // global is shared mutable state that Swift 6 rejects on Linux.
+        FileHandle.standardOutput.write(Data((text + "\n").utf8))
     }
 }
