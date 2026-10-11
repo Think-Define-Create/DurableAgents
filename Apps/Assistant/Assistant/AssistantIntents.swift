@@ -9,20 +9,38 @@ struct AskAssistantIntent: AppIntent {
     var message: String
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let text = await AssistantActions.ask(message)
+        let message = self.message
+        let text: String
+        if #available(iOS 27, macOS 27, *) {
+            // A reply can outlast Siri's foreground window. iOS 27 lets it finish in the background.
+            text = try await performBackgroundTask { await AssistantActions.ask(message) }
+        } else {
+            text = await AssistantActions.ask(message)
+        }
         return .result(dialog: IntentDialog(stringLiteral: text))
     }
 }
+
+@available(iOS 27, macOS 27, *)
+extension AskAssistantIntent: LongRunningIntent {}
 
 struct RunRoutineIntent: AppIntent {
     static let title: LocalizedStringResource = "Run routine now"
     static let description = IntentDescription("Catch up due routines. This does not promise a future wake.")
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let text = await AssistantActions.catchUp()
+        let text: String
+        if #available(iOS 27, macOS 27, *) {
+            text = try await performBackgroundTask { await AssistantActions.catchUp() }
+        } else {
+            text = await AssistantActions.catchUp()
+        }
         return .result(dialog: IntentDialog(stringLiteral: text))
     }
 }
+
+@available(iOS 27, macOS 27, *)
+extension RunRoutineIntent: LongRunningIntent {}
 
 struct ApprovePendingIntent: AppIntent {
     static let title: LocalizedStringResource = "Approve pending request"
